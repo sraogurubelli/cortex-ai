@@ -62,10 +62,13 @@ Usage:
 
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from cortex.rag.embeddings import EmbeddingService
 from cortex.rag.vector_store import VectorStore
+
+if TYPE_CHECKING:
+    from cortex.rag.graph.graph_store import GraphStore
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +106,7 @@ class Retriever:
         self,
         embeddings: EmbeddingService,
         vector_store: VectorStore,
+        graph_store: "GraphStore | None" = None,
     ):
         """
         Initialize retriever.
@@ -110,17 +114,31 @@ class Retriever:
         Args:
             embeddings: Embedding service
             vector_store: Vector store
+            graph_store: Optional graph store for GraphRAG
 
         Example:
             >>> retriever = Retriever(
             ...     embeddings=embeddings,
             ...     vector_store=vector_store,
             ... )
+
+            >>> # With GraphRAG
+            >>> from cortex.rag.graph import GraphStore
+            >>> graph_store = GraphStore(url="bolt://localhost:7687")
+            >>> retriever = Retriever(
+            ...     embeddings=embeddings,
+            ...     vector_store=vector_store,
+            ...     graph_store=graph_store,
+            ... )
         """
         self.embeddings = embeddings
         self.vector_store = vector_store
+        self.graph_store = graph_store
 
-        logger.info("Retriever initialized")
+        if graph_store:
+            logger.info("Retriever initialized with GraphRAG support")
+        else:
+            logger.info("Retriever initialized")
 
     async def search(
         self,
@@ -444,6 +462,295 @@ class Retriever:
             total_chars += len(part)
 
         return "\n\n".join(parts)
+
+    async def graph_search(
+        self,
+        concept_name: str,
+        max_hops: int = 2,
+        tenant_id: str | None = None,
+    ) -> list[SearchResult]:
+        """
+        Search using knowledge graph traversal.
+
+        Finds documents that mention a concept and related concepts within max_hops.
+
+        Args:
+            concept_name: Name of concept to search for
+            max_hops: Maximum relationship hops to traverse (default: 2)
+            tenant_id: Optional tenant ID for filtering
+
+        Returns:
+            list[SearchResult]: Documents related to the concept
+
+        Example:
+            >>> results = await retriever.graph_search(
+            ...     concept_name="GraphRAG",
+            ...     max_hops=2,
+            ...     tenant_id="demo",
+            ... )
+        """
+        if not self.graph_store:
+            raise ValueError(
+                "GraphStore not configured. Initialize Retriever with graph_store parameter."
+            )
+
+        if not concept_name.strip():
+            raise ValueError("Concept name cannot be empty")
+
+        # Build Cypher query for multi-hop traversal
+        tenant_filter = "AND c.tenant_id = $tenant_id" if tenant_id else ""
+
+        query = f"""
+        MATCH (c:Concept {{name: $concept_name}})
+        WHERE 1=1 {tenant_filter}
+        WITH c
+        MATCH (c)-[:RELATES_TO*0..{max_hops}]-(related:Concept)
+        WITH DISTINCT related
+        MATCH (d:Document)-[m:MENTIONS]->(related)
+        RETURN DISTINCT d.id as doc_id,
+               d.content as content,
+               COUNT(DISTINCT related) as concept_count,
+               SUM(m.confidence) as total_confidence
+        ORDER BY concept_count DESC, total_confidence DESC
+        """
+
+        params = {"concept_name": concept_name}
+        if tenant_id:
+            params["tenant_id"] = tenant_id
+
+        # Execute query
+        results = []
+        if self.graph_store.driver:
+            async with self.graph_store.driver.session() as session:
+                result = await session.run(query, **params)
+                records = await result.values()
+
+                # Convert to SearchResult objects
+                for record in records:
+                    doc_id, content, concept_count, total_confidence = record
+
+                    # Normalize score (0.0 to 1.0)
+                    # Score based on number of related concepts and confidence
+                    score = min(1.0, (concept_count * 0.3 + total_confidence * 0.1))
+
+                    results.append(
+                        SearchResult(
+                            id=doc_id,
+                            content=content or "",
+                            score=score,
+                            metadata={
+                                "source": "graph",
+                                "concept_count": concept_count,
+                                "total_confidence": total_confidence,
+                            },
+                        )
+                    )
+
+        logger.info(
+            f"Graph search for concept '{concept_name}' (max_hops={max_hops}) "
+            f"returned {len(results)} documents"
+        )
+        return results
+
+    async def graphrag_search(
+        self,
+        query: str,
+        top_k: int = 5,
+        vector_weight: float = 0.7,
+        graph_weight: float = 0.3,
+        max_hops: int = 2,
+        tenant_id: str | None = None,
+    ) -> list[SearchResult]:
+        """
+        Hybrid search combining vector and graph retrieval (GraphRAG).
+
+        Performs both vector similarity search and graph traversal, then
+        combines results using Reciprocal Rank Fusion (RRF).
+
+        Args:
+            query: Search query text
+            top_k: Number of final results to return
+            vector_weight: Weight for vector search results (0.0-1.0)
+            graph_weight: Weight for graph search results (0.0-1.0)
+            max_hops: Maximum relationship hops in graph traversal
+            tenant_id: Optional tenant ID for filtering
+
+        Returns:
+            list[SearchResult]: Combined results from vector + graph search
+
+        Example:
+            >>> results = await retriever.graphrag_search(
+            ...     query="What is GraphRAG?",
+            ...     top_k=5,
+            ...     vector_weight=0.7,
+            ...     graph_weight=0.3,
+            ... )
+        """
+        if not self.graph_store:
+            # Fallback to pure vector search if no graph store
+            logger.warning("GraphStore not available, falling back to vector search only")
+            return await self.search(query, top_k=top_k, tenant_id=tenant_id)
+
+        # Normalize weights
+        total_weight = vector_weight + graph_weight
+        if total_weight == 0:
+            raise ValueError("At least one of vector_weight or graph_weight must be > 0")
+
+        vector_weight = vector_weight / total_weight
+        graph_weight = graph_weight / total_weight
+
+        # 1. Vector search
+        vector_results = await self.search(
+            query=query,
+            top_k=top_k * 2,  # Get more candidates for fusion
+            tenant_id=tenant_id,
+        )
+
+        # 2. Graph search (extract concept from query using simple keyword extraction)
+        # In production, use NER or LLM to extract concepts
+        concept_names = self._extract_concepts_from_query(query)
+
+        graph_results = []
+        for concept_name in concept_names[:3]:  # Limit to top 3 concepts
+            try:
+                concept_results = await self.graph_search(
+                    concept_name=concept_name,
+                    max_hops=max_hops,
+                    tenant_id=tenant_id,
+                )
+                graph_results.extend(concept_results)
+            except Exception as e:
+                logger.warning(f"Graph search failed for concept '{concept_name}': {e}")
+                continue
+
+        # 3. Fuse results using Reciprocal Rank Fusion (RRF)
+        fused_results = self._reciprocal_rank_fusion(
+            vector_results=vector_results,
+            graph_results=graph_results,
+            vector_weight=vector_weight,
+            graph_weight=graph_weight,
+        )
+
+        # 4. Return top_k results
+        final_results = fused_results[:top_k]
+
+        logger.info(
+            f"GraphRAG search for '{query[:50]}...' returned {len(final_results)} results "
+            f"(vector: {len(vector_results)}, graph: {len(graph_results)})"
+        )
+        return final_results
+
+    def _extract_concepts_from_query(self, query: str) -> list[str]:
+        """
+        Extract potential concept names from query.
+
+        Simple keyword extraction. In production, use NER or LLM.
+
+        Args:
+            query: Query text
+
+        Returns:
+            list[str]: Potential concept names
+        """
+        # Simple approach: capitalize words that look like proper nouns
+        words = query.split()
+        concepts = []
+
+        for word in words:
+            # Keep capitalized words or common tech terms
+            cleaned = word.strip(',.!?;:"\'')
+            if cleaned and (cleaned[0].isupper() or len(cleaned) > 6):
+                concepts.append(cleaned)
+
+        # Fallback: if no concepts found, use all non-stopwords
+        if not concepts:
+            stopwords = {'the', 'is', 'at', 'which', 'on', 'a', 'an', 'and', 'or', 'but', 'in', 'with', 'to', 'for'}
+            concepts = [w.strip(',.!?;:"\'') for w in words if w.lower() not in stopwords and len(w) > 3]
+
+        return concepts[:5]  # Limit to 5 concepts
+
+    def _reciprocal_rank_fusion(
+        self,
+        vector_results: list[SearchResult],
+        graph_results: list[SearchResult],
+        vector_weight: float = 0.7,
+        graph_weight: float = 0.3,
+        k: int = 60,
+    ) -> list[SearchResult]:
+        """
+        Combine results using Reciprocal Rank Fusion (RRF).
+
+        RRF Score: score(d) = Σ w_i / (k + rank_i(d))
+        where w_i is the weight for source i, rank_i is the rank in that source.
+
+        Args:
+            vector_results: Results from vector search
+            graph_results: Results from graph search
+            vector_weight: Weight for vector results
+            graph_weight: Weight for graph results
+            k: RRF constant (default: 60, from literature)
+
+        Returns:
+            list[SearchResult]: Fused results sorted by RRF score
+        """
+        # Build rank maps
+        vector_ranks = {r.id: rank for rank, r in enumerate(vector_results, 1)}
+        graph_ranks = {r.id: rank for rank, r in enumerate(graph_results, 1)}
+
+        # Collect all unique document IDs
+        all_doc_ids = set(vector_ranks.keys()) | set(graph_ranks.keys())
+
+        # Calculate RRF scores
+        doc_scores: dict[str, float] = {}
+        doc_content: dict[str, SearchResult] = {}
+
+        for doc_id in all_doc_ids:
+            rrf_score = 0.0
+
+            # Vector contribution
+            if doc_id in vector_ranks:
+                rrf_score += vector_weight / (k + vector_ranks[doc_id])
+                # Store content from vector results (prefer vector content)
+                doc_content[doc_id] = next(r for r in vector_results if r.id == doc_id)
+
+            # Graph contribution
+            if doc_id in graph_ranks:
+                rrf_score += graph_weight / (k + graph_ranks[doc_id])
+                # Store content from graph results if not already stored
+                if doc_id not in doc_content:
+                    doc_content[doc_id] = next(r for r in graph_results if r.id == doc_id)
+
+            doc_scores[doc_id] = rrf_score
+
+        # Sort by RRF score
+        sorted_doc_ids = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)
+
+        # Build final results
+        fused_results = []
+        for doc_id, rrf_score in sorted_doc_ids:
+            original = doc_content[doc_id]
+
+            # Update metadata to indicate fusion
+            metadata = original.metadata.copy()
+            metadata["rrf_score"] = rrf_score
+            metadata["in_vector"] = doc_id in vector_ranks
+            metadata["in_graph"] = doc_id in graph_ranks
+
+            if doc_id in vector_ranks:
+                metadata["vector_rank"] = vector_ranks[doc_id]
+            if doc_id in graph_ranks:
+                metadata["graph_rank"] = graph_ranks[doc_id]
+
+            fused_results.append(
+                SearchResult(
+                    id=original.id,
+                    content=original.content,
+                    score=rrf_score,  # Use RRF score as final score
+                    metadata=metadata,
+                )
+            )
+
+        return fused_results
 
     async def rerank(
         self,

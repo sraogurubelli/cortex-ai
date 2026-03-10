@@ -36,8 +36,14 @@ Cortex-AI is a standalone, open-source platform extracted from production system
 - 🏢 **Multi-Tenancy** - Tenant isolation
 - 🤖 **Agent Integration** - RAG-enhanced chatbots
 
+### GraphRAG (Knowledge Graphs) ✅ Complete
+- 🕸️ **Knowledge Graph** - Neo4j integration with automatic entity extraction
+- 📊 **Entity Extraction** - LLM-based concept and relationship extraction
+- 🔍 **Graph Search** - Concept-based retrieval with multi-hop traversal
+- 🔀 **Hybrid GraphRAG** - Vector + graph search with RRF fusion
+- 🎯 **Multi-Tenancy** - Tenant-isolated knowledge graphs
+
 ### Future Roadmap
-- 🕸️ **Knowledge Graph** - Neo4j integration for semantic reasoning
 - 📊 **Analytics Layer** - StarRocks OLAP for real-time analytics
 - 📡 **Event Streaming** - Kafka integration for async workflows
 
