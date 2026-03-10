@@ -73,10 +73,26 @@ from cortex.rag.embeddings import EmbeddingService
 from cortex.rag.retriever import Retriever, SearchResult
 from cortex.rag.vector_store import VectorStore
 
-__all__ = [
-    "EmbeddingService",
-    "VectorStore",
-    "DocumentManager",
-    "Retriever",
-    "SearchResult",
-]
+# GraphRAG components (optional)
+try:
+    from cortex.rag.graph.graph_store import GraphStore
+    from cortex.rag.graph.entity_extractor import EntityExtractor
+
+    __all__ = [
+        "EmbeddingService",
+        "VectorStore",
+        "DocumentManager",
+        "Retriever",
+        "SearchResult",
+        "GraphStore",
+        "EntityExtractor",
+    ]
+except ImportError:
+    # GraphRAG dependencies not installed
+    __all__ = [
+        "EmbeddingService",
+        "VectorStore",
+        "DocumentManager",
+        "Retriever",
+        "SearchResult",
+    ]

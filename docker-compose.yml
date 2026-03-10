@@ -59,6 +59,29 @@ services:
     networks:
       - cortex-network
 
+  # Neo4j - Graph Database (GraphRAG)
+  neo4j:
+    image: neo4j:5-community
+    container_name: cortex-neo4j
+    ports:
+      - "7474:7474"  # HTTP (Neo4j Browser)
+      - "7687:7687"  # Bolt (driver connection)
+    environment:
+      NEO4J_AUTH: neo4j/cortex_neo4j_password
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_memory_heap_max__size: 1G
+      NEO4J_dbms_memory_pagecache_size: 512M
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "cortex_neo4j_password", "RETURN 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - cortex-network
+
   # Prometheus - Metrics (Optional)
   prometheus:
     image: prom/prometheus:latest
@@ -104,6 +127,10 @@ volumes:
   qdrant_data:
     driver: local
   redis_data:
+    driver: local
+  neo4j_data:
+    driver: local
+  neo4j_logs:
     driver: local
   prometheus_data:
     driver: local

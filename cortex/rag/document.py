@@ -48,10 +48,14 @@ Usage:
 """
 
 import logging
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from cortex.rag.embeddings import EmbeddingService
 from cortex.rag.vector_store import VectorStore
+
+if TYPE_CHECKING:
+    from cortex.rag.graph.graph_store import GraphStore
+    from cortex.rag.graph.entity_extractor import EntityExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +71,8 @@ class DocumentManager:
         self,
         embeddings: EmbeddingService,
         vector_store: VectorStore,
+        graph_store: "GraphStore | None" = None,
+        entity_extractor: "EntityExtractor | None" = None,
         chunk_size: int | None = None,
         chunk_overlap: int | None = None,
     ):
@@ -76,6 +82,8 @@ class DocumentManager:
         Args:
             embeddings: Embedding service
             vector_store: Vector store
+            graph_store: Optional graph store for GraphRAG (Neo4j)
+            entity_extractor: Optional entity extractor for GraphRAG
             chunk_size: Maximum characters per chunk (optional, for long documents)
             chunk_overlap: Overlap between chunks (optional)
 
@@ -86,13 +94,32 @@ class DocumentManager:
             ...     chunk_size=2000,  # Split long documents
             ...     chunk_overlap=200,
             ... )
+
+            >>> # With GraphRAG
+            >>> from cortex.rag.graph import GraphStore, EntityExtractor
+            >>> from cortex.orchestration import ModelConfig
+            >>>
+            >>> graph_store = GraphStore(url="bolt://localhost:7687")
+            >>> extractor = EntityExtractor(ModelConfig(model="gpt-4o-mini"))
+            >>>
+            >>> doc_manager = DocumentManager(
+            ...     embeddings=embeddings,
+            ...     vector_store=vector_store,
+            ...     graph_store=graph_store,
+            ...     entity_extractor=extractor,
+            ... )
         """
         self.embeddings = embeddings
         self.vector_store = vector_store
+        self.graph_store = graph_store
+        self.entity_extractor = entity_extractor
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
 
-        logger.info("Document manager initialized")
+        if graph_store and entity_extractor:
+            logger.info("Document manager initialized with GraphRAG support")
+        else:
+            logger.info("Document manager initialized")
 
     def _chunk_text(self, text: str) -> list[str]:
         """
@@ -140,18 +167,21 @@ class DocumentManager:
         content: str,
         metadata: dict[str, Any] | None = None,
         tenant_id: str | None = None,
+        extract_entities: bool = True,
     ) -> int:
         """
         Ingest a document into the RAG system.
 
         Generates embeddings and stores in vector database.
         For long documents, splits into chunks and ingests separately.
+        If GraphRAG is enabled, extracts entities and relationships.
 
         Args:
             doc_id: Unique document ID
             content: Document text content
             metadata: Optional metadata (source, author, etc.)
             tenant_id: Optional tenant ID for multi-tenancy
+            extract_entities: Extract entities for GraphRAG (default: True if enabled)
 
         Returns:
             int: Number of chunks ingested (1 for non-chunked documents)
@@ -197,6 +227,15 @@ class DocumentManager:
             )
 
         logger.info(f"Ingested document {doc_id} ({len(chunks)} chunks)")
+
+        # Extract entities and sync to graph (if enabled)
+        if extract_entities and self.graph_store and self.entity_extractor:
+            await self._extract_and_sync_to_graph(
+                doc_id=doc_id,
+                content=content,
+                tenant_id=tenant_id or "default",
+            )
+
         return len(chunks)
 
     async def ingest_batch(
@@ -461,3 +500,93 @@ class DocumentManager:
             ... )
         """
         return await self.vector_store.count(filter=filter)
+
+    async def _extract_and_sync_to_graph(
+        self,
+        doc_id: str,
+        content: str,
+        tenant_id: str,
+    ) -> None:
+        """
+        Extract entities from document and sync to Neo4j graph.
+
+        Internal method called during ingestion when GraphRAG is enabled.
+
+        Args:
+            doc_id: Document ID
+            content: Full document content
+            tenant_id: Tenant ID for multi-tenancy
+        """
+        if not self.graph_store or not self.entity_extractor:
+            return
+
+        try:
+            logger.debug(f"Extracting entities for document {doc_id}")
+
+            # Extract entities using LLM
+            result = await self.entity_extractor.extract(content)
+
+            # Add document to graph
+            await self.graph_store.add_document(
+                doc_id=doc_id,
+                content=content,
+                tenant_id=tenant_id,
+            )
+
+            # Track concept IDs for relationship creation
+            concept_ids: dict[str, str] = {}
+
+            # Add concepts and MENTIONS relationships
+            for concept_data in result.concepts:
+                concept_name = concept_data.get("name", "")
+                concept_category = concept_data.get("category", "unknown")
+
+                if not concept_name:
+                    continue
+
+                # Add concept (MERGE handles duplicates)
+                concept_id = await self.graph_store.add_concept(
+                    name=concept_name,
+                    category=concept_category,
+                    tenant_id=tenant_id,
+                )
+                concept_ids[concept_name] = concept_id
+
+                # Add MENTIONS relationship from document to concept
+                await self.graph_store.add_relationship(
+                    source_id=doc_id,
+                    target_id=concept_id,
+                    rel_type="MENTIONS",
+                    properties={"count": 1, "confidence": 0.9},
+                )
+
+            # Add concept-to-concept relationships (RELATES_TO)
+            for rel_data in result.relationships:
+                source_name = rel_data.get("source", "")
+                target_name = rel_data.get("target", "")
+                rel_type = rel_data.get("type", "RELATES_TO")
+                strength = rel_data.get("strength", 0.5)
+
+                # Only create relationship if both concepts were extracted
+                if source_name in concept_ids and target_name in concept_ids:
+                    await self.graph_store.add_relationship(
+                        source_id=concept_ids[source_name],
+                        target_id=concept_ids[target_name],
+                        rel_type="RELATES_TO",
+                        properties={"strength": strength, "context": rel_type},
+                    )
+
+            logger.info(
+                f"GraphRAG: Extracted {len(result.concepts)} concepts and "
+                f"{len(result.relationships)} relationships for document {doc_id}"
+            )
+
+        except Exception as e:
+            # Don't fail ingestion if graph sync fails
+            logger.error(
+                f"Failed to extract entities for document {doc_id}: {e}",
+                exc_info=True,
+            )
+            logger.warning(
+                "Document ingested to vector store but GraphRAG sync failed"
+            )
