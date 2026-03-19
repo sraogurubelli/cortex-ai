@@ -41,7 +41,7 @@ from langgraph.graph.state import CompiledStateGraph
 
 from cortex.orchestration.builder import build_agent
 from cortex.orchestration.config import AgentConfig, ModelConfig
-from cortex.orchestration.observability import ModelUsageTracker
+from cortex.orchestration.usage_tracking import ModelUsageTracker
 from cortex.orchestration.streaming import StreamHandler, StreamWriterProtocol
 from cortex.orchestration.tools import ToolRegistry
 

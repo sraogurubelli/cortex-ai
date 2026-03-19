@@ -1,0 +1,82 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: cortex
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: cortex_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run tests with coverage
+        env:
+          DATABASE_URL: postgresql://cortex:test_password@localhost:5432/cortex_test
+          REDIS_URL: redis://localhost:6379/0
+          JWT_SECRETS: test-secret-1,test-secret-2
+          SECRET_KEY: test-secret-key
+          RBAC_ENABLED: "true"
+          APP_ENV: test
+        run: |
+          pytest tests/ -v --cov=cortex --cov-report=xml --cov-report=term-missing --cov-branch
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        if: matrix.python-version == '3.11'
+        with:
+          file: ./coverage.xml
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Archive coverage report
+        if: matrix.python-version == '3.11'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: htmlcov/
+          retention-days: 7

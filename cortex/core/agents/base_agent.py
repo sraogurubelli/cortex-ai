@@ -1,6 +1,20 @@
 """
 Base Agent: Foundation for agent implementations in Cortex-AI.
 
+⚠️ DEPRECATED: This module is deprecated and will be removed in a future version.
+Please use cortex.orchestration.Agent instead for new implementations.
+
+Migration Guide:
+- Old: from cortex.core.agents.base_agent import BaseAgent, BaseTool
+- New: from cortex.orchestration.agent import Agent
+       from cortex.orchestration.tools import Tool
+
+The new orchestration layer provides:
+- LangGraph-based agent orchestration
+- Better tool management with ToolRegistry
+- Enhanced observability and middleware support
+- Multi-agent swarm capabilities
+
 Provides:
 - Multi-turn conversation support
 - Tool/function calling
@@ -8,8 +22,9 @@ Provides:
 - Token management
 """
 
+import warnings
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional, Union
 import structlog
 
 from ..providers.llm_provider import BaseLLMClient, LLMResponse
@@ -17,11 +32,32 @@ from .conversation_manager import ConversationManager, MessageRole, ToolCall, To
 
 logger = structlog.get_logger(__name__)
 
+# Issue deprecation warning when module is imported
+warnings.warn(
+    "cortex.core.agents.base_agent is deprecated and will be removed in a future version. "
+    "Please migrate to cortex.orchestration.Agent for new implementations. "
+    "See module docstring for migration guide.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
 
 class BaseTool(ABC):
-    """Base class for tools/functions that agents can use."""
+    """
+    Base class for tools/functions that agents can use.
+
+    ⚠️ DEPRECATED: Use cortex.orchestration.tools.Tool instead.
+
+    Migration:
+        from cortex.orchestration.tools import Tool, ToolRegistry
+    """
 
     def __init__(self, name: str, description: str):
+        warnings.warn(
+            f"BaseTool is deprecated. Please use cortex.orchestration.tools.Tool instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.name = name
         self.description = description
 
@@ -39,6 +75,28 @@ class BaseTool(ABC):
 class BaseAgent(ABC):
     """
     Base class for AI agents with tool-calling capabilities.
+
+    ⚠️ DEPRECATED: Use cortex.orchestration.Agent instead.
+
+    Migration:
+        # Old approach:
+        from cortex.core.agents.base_agent import BaseAgent
+        agent = BaseAgent(llm_client=client, tools=tools)
+
+        # New approach:
+        from cortex.orchestration.agent import Agent
+        from cortex.orchestration.builder import AgentBuilder
+
+        agent = AgentBuilder()\\
+            .with_model(...)\\
+            .with_tools(...)\\
+            .build()
+
+    The new orchestration layer provides better:
+    - LangGraph-based orchestration for complex workflows
+    - Middleware support for cross-cutting concerns
+    - Enhanced observability and tracing
+    - Multi-agent swarm capabilities
     """
 
     def __init__(
@@ -61,6 +119,12 @@ class BaseAgent(ABC):
             max_iterations: Maximum iterations for tool calling loops
             agent_name: Name of the agent
         """
+        warnings.warn(
+            f"BaseAgent is deprecated. Please use cortex.orchestration.Agent instead. "
+            f"See class docstring for migration guide.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.llm_client = llm_client
         self.conversation_manager = conversation_manager or ConversationManager(
             llm_client=llm_client,
@@ -127,7 +191,7 @@ class BaseAgent(ABC):
         self,
         user_message: str,
         stream: bool = False,
-    ) -> AsyncIterator[str] if stream else str:
+    ) -> Union[AsyncIterator[str], str]:
         """
         Run the agent with a user message.
 

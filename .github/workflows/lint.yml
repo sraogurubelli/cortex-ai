@@ -1,0 +1,50 @@
+name: Lint
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run Ruff linter
+        run: |
+          ruff check cortex/ tests/ examples/
+        continue-on-error: false
+
+      - name: Check code formatting with Black
+        run: |
+          black --check --diff cortex/ tests/ examples/
+
+      - name: Run type checking with Mypy
+        run: |
+          mypy cortex/
+
+      - name: Run security scanner (Bandit)
+        run: |
+          bandit -r cortex/ -ll
+        continue-on-error: true
+
+      - name: Check for common security issues
+        run: |
+          pip install safety
+          safety check --continue-on-error
+        continue-on-error: true
