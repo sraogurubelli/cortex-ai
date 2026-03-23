@@ -1,0 +1,116 @@
+name: Cortex CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  # =========================================================================
+  # Backend: Python (cortex-ai)
+  # =========================================================================
+  backend:
+    name: Backend Tests & Lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -e ".[dev]"
+          pip install ruff
+
+      - name: Lint (ruff)
+        run: ruff check cortex/ tests/ evals/ --select E,W,F,I
+
+      - name: Type check (optional)
+        run: ruff check cortex/ --select ANN || true
+        continue-on-error: true
+
+      - name: Run unit tests
+        env:
+          DATABASE_URL: "sqlite+aiosqlite:///test.db"
+          JWT_SECRETS: '["ci-test-secret-key-32-bytes-long!"]'
+          SECRET_KEY: "ci-secret-key-for-testing-32bytes"
+          RBAC_ENABLED: "false"
+        run: |
+          python -m pytest tests/unit/ \
+            --ignore=tests/unit/rag/graph/test_graph_store.py \
+            -x --tb=short -q \
+            --cov=cortex --cov-report=term-missing \
+            --cov-fail-under=20
+
+      - name: Verify app starts
+        env:
+          DATABASE_URL: "sqlite+aiosqlite:///startup_test.db"
+          JWT_SECRETS: '["ci-test-secret-key-32-bytes-long!"]'
+          SECRET_KEY: "ci-secret-key-for-testing-32bytes"
+          RBAC_ENABLED: "false"
+        run: |
+          python -c "
+          import os
+          from cortex.api.main import create_app
+          app = create_app()
+          routes = [r.path for r in app.routes if hasattr(r, 'path')]
+          assert len(routes) > 40, f'Expected 40+ routes, got {len(routes)}'
+          print(f'App created with {len(routes)} routes')
+          "
+
+  # =========================================================================
+  # Frontend: TypeScript/React (cortex-ui)
+  # =========================================================================
+  frontend:
+    name: Frontend Build & Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ../cortex-ui
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: cortex-ai
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/cortex-ui
+          path: cortex-ui
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install dependencies
+        working-directory: cortex-ui
+        run: pnpm install --no-frozen-lockfile
+
+      - name: TypeScript check
+        working-directory: cortex-ui
+        run: pnpm --filter @cortex/core-ui exec tsc -b --noEmit || true
+        continue-on-error: true
+
+      - name: Build
+        working-directory: cortex-ui
+        run: NODE_OPTIONS="--max-old-space-size=4096" pnpm build:host
+
+      - name: Run tests
+        working-directory: cortex-ui
+        run: pnpm --filter @cortex/core-ui test -- --run

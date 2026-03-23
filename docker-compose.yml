@@ -1,138 +1,115 @@
-version: '3.8'
+###############################################################################
+# Cortex-AI Local Development Stack
+#
+# Usage:
+#   docker compose up -d                  # Start core services
+#   docker compose --profile graphrag up -d  # Include Neo4j
+#   docker compose down -v                # Tear down with volumes
+###############################################################################
 
 services:
-  # PostgreSQL - OLTP Database
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — Primary database
+  # ---------------------------------------------------------------------------
   postgres:
     image: postgres:16-alpine
-    container_name: cortex-postgres
+    restart: unless-stopped
     environment:
-      POSTGRES_DB: cortex
       POSTGRES_USER: cortex
-      POSTGRES_PASSWORD: cortex_dev_password
-      PGDATA: /var/lib/postgresql/data/pgdata
+      POSTGRES_PASSWORD: cortex_dev
+      POSTGRES_DB: cortex
     ports:
       - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U cortex"]
-      interval: 10s
-      timeout: 5s
+      interval: 5s
+      timeout: 3s
       retries: 5
-    networks:
-      - cortex-network
 
-  # Qdrant - Vector Database
-  qdrant:
-    image: qdrant/qdrant:v1.16.3
-    container_name: cortex-qdrant
-    ports:
-      - "6333:6333"  # HTTP API
-      - "6334:6334"  # gRPC API
-    volumes:
-      - qdrant_data:/qdrant/storage
-    environment:
-      QDRANT__SERVICE__HTTP_PORT: 6333
-      QDRANT__SERVICE__GRPC_PORT: 6334
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - cortex-network
-
-  # Redis - Cache & Session Store
+  # ---------------------------------------------------------------------------
+  # Redis — Caching, sessions, permission cache
+  # ---------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
-    container_name: cortex-redis
+    restart: unless-stopped
     ports:
       - "6379:6379"
     volumes:
-      - redis_data:/data
-    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+      - redisdata:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
+      interval: 5s
+      timeout: 3s
       retries: 5
-    networks:
-      - cortex-network
 
-  # Neo4j - Graph Database (GraphRAG)
+  # ---------------------------------------------------------------------------
+  # Qdrant — Vector search for RAG
+  # ---------------------------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrantdata:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:6333/readyz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Neo4j — Graph database for GraphRAG (optional, behind profile)
+  # ---------------------------------------------------------------------------
   neo4j:
     image: neo4j:5-community
-    container_name: cortex-neo4j
-    ports:
-      - "7474:7474"  # HTTP (Neo4j Browser)
-      - "7687:7687"  # Bolt (driver connection)
+    restart: unless-stopped
+    profiles:
+      - graphrag
     environment:
-      NEO4J_AUTH: neo4j/cortex_neo4j_password
+      NEO4J_AUTH: neo4j/cortex_dev
       NEO4J_PLUGINS: '["apoc"]'
-      NEO4J_dbms_memory_heap_max__size: 1G
-      NEO4J_dbms_memory_pagecache_size: 512M
+    ports:
+      - "7474:7474"
+      - "7687:7687"
     volumes:
-      - neo4j_data:/data
-      - neo4j_logs:/logs
+      - neo4jdata:/data
     healthcheck:
-      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "cortex_neo4j_password", "RETURN 1"]
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p cortex_dev 'RETURN 1' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
-    networks:
-      - cortex-network
 
-  # Prometheus - Metrics (Optional)
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: cortex-prometheus
+  # ---------------------------------------------------------------------------
+  # Cortex-AI API server
+  # ---------------------------------------------------------------------------
+  cortex-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
     ports:
-      - "9090:9090"
-    volumes:
-      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus_data:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
-      - '--web.console.templates=/usr/share/prometheus/consoles'
-    networks:
-      - cortex-network
-    profiles:
-      - monitoring
-
-  # Grafana - Dashboards (Optional)
-  grafana:
-    image: grafana/grafana:latest
-    container_name: cortex-grafana
-    ports:
-      - "3000:3000"
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    env_file:
+      - .env
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: admin
-      GF_USERS_ALLOW_SIGN_UP: false
-    volumes:
-      - grafana_data:/var/lib/grafana
-    networks:
-      - cortex-network
-    profiles:
-      - monitoring
-
-networks:
-  cortex-network:
-    driver: bridge
+      DATABASE_URL: postgresql+asyncpg://cortex:cortex_dev@postgres:5432/cortex
+      REDIS_URL: redis://redis:6379/0
+      QDRANT_URL: http://qdrant:6333
+      CORS_ORIGINS: '["http://localhost:5177","http://localhost:3000"]'
 
 volumes:
-  postgres_data:
-    driver: local
-  qdrant_data:
-    driver: local
-  redis_data:
-    driver: local
-  neo4j_data:
-    driver: local
-  neo4j_logs:
-    driver: local
-  prometheus_data:
-    driver: local
-  grafana_data:
-    driver: local
+  pgdata:
+  redisdata:
+  qdrantdata:
+  neo4jdata:

@@ -33,13 +33,17 @@ class DatabaseManager:
             )
 
         # Create async engine
-        self.engine = create_async_engine(
-            self.database_url,
-            echo=settings.database_echo,
-            pool_size=settings.database_pool_size,
-            max_overflow=settings.database_max_overflow,
-            poolclass=NullPool if "sqlite" in self.database_url else None,
-        )
+        is_sqlite = "sqlite" in self.database_url
+        engine_kwargs: dict = {
+            "echo": settings.database_echo,
+        }
+        if is_sqlite:
+            engine_kwargs["poolclass"] = NullPool
+        else:
+            engine_kwargs["pool_size"] = settings.database_pool_size
+            engine_kwargs["max_overflow"] = settings.database_max_overflow
+
+        self.engine = create_async_engine(self.database_url, **engine_kwargs)
 
         # Create session factory
         self.session_factory = async_sessionmaker(

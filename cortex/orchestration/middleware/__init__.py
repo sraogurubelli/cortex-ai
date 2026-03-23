@@ -61,6 +61,10 @@ from cortex.orchestration.middleware.built_in import (
     TimingMiddleware,
 )
 from cortex.orchestration.middleware.memory import MemoryMiddleware
+from cortex.orchestration.middleware.summarization import (
+    MessageTrimmingMiddleware,
+    create_summarization_middleware,
+)
 
 __all__ = [
     "BaseMiddleware",
@@ -70,4 +74,6 @@ __all__ = [
     "ErrorHandlingMiddleware",
     "RateLimitMiddleware",
     "MemoryMiddleware",
+    "MessageTrimmingMiddleware",
+    "create_summarization_middleware",
 ]

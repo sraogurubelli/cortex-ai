@@ -418,14 +418,19 @@ result = await agent.run("query", thread_id="conv-123")
 4. Automatic knowledge update
 5. Query optimization
 
-**Files to Create**:
+**Status**: Deferred — GraphRAG capabilities (entity extraction, graph store,
+graph search with RRF fusion) are already in `cortex/rag/graph/`. A standalone
+KG memory module is not yet implemented. The existing `cortex/orchestration/memory/`
+package provides `SemanticMemoryStore` (vector-based) and typed memory schemas.
+
+**Files (planned, not yet created)**:
 - `cortex/orchestration/memory/knowledge_graph.py`
 - `cortex/orchestration/memory/vector_store.py`
 
 **Integration with Existing RAG**:
-- Leverage existing `cortex/rag/embeddings.py`
-- Add Neo4j connector
-- Unified retrieval API
+- Leverage existing `cortex/rag/embeddings.py` and `cortex/rag/graph/`
+- Neo4j connector already available via `CORTEX_GRAPHRAG_ENABLED`
+- Unified retrieval API (future)
 
 ### Phase 4: Multi-Agent Memory Sharing (Month 3)
 

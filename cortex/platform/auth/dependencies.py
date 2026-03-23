@@ -4,6 +4,7 @@ FastAPI Dependencies for RBAC
 Provides easy-to-use permission checking for API endpoints.
 """
 
+import logging
 from typing import Callable
 
 from fastapi import Depends, HTTPException, Request, status
@@ -14,19 +15,48 @@ from cortex.platform.auth.permissions import Permission
 from cortex.platform.auth.rbac import PermissionChecker
 from cortex.platform.database import Principal, get_db
 
+logger = logging.getLogger(__name__)
+
+_redis_client: Redis | None = None
+_redis_unavailable = False
+
 
 async def get_redis() -> Redis | None:
     """
-    Get Redis client for caching.
+    Get a shared Redis client for permission caching.
 
-    TODO: Implement Redis connection pooling.
-    For now, returns None (caching disabled).
-
-    Returns:
-        Redis client or None
+    Lazily creates a connection from settings on first call.
+    If Redis is unreachable, marks it as unavailable and returns None
+    (permission checks still work — just without caching).
     """
-    # TODO: Implement proper Redis connection
-    return None
+    global _redis_client, _redis_unavailable
+
+    if _redis_unavailable:
+        return None
+
+    if _redis_client is not None:
+        return _redis_client
+
+    try:
+        from cortex.platform.config import get_settings
+
+        settings = get_settings()
+        client = Redis.from_url(
+            settings.redis_url,
+            max_connections=settings.redis_max_connections,
+            socket_timeout=settings.redis_socket_timeout,
+            decode_responses=True,
+        )
+        await client.ping()
+        _redis_client = client
+        logger.info("Redis connected for permission caching")
+        return _redis_client
+    except Exception:
+        _redis_unavailable = True
+        logger.info(
+            "Redis unavailable — permission caching disabled (lookups still work via DB)"
+        )
+        return None
 
 
 async def get_permission_checker(

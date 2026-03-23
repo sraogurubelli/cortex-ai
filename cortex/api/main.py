@@ -5,6 +5,7 @@ Cortex-AI Platform API with authentication, RBAC, and resource management.
 """
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
@@ -12,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from cortex.api.middleware.auth import AuthenticationMiddleware
-from cortex.api.routes import auth, accounts, organizations, projects, chat
+from cortex.api.routes import auth, accounts, organizations, projects, chat, documents, prompts, agents, skills, models, traces
 from cortex.platform.config.settings import get_settings
 from cortex.platform.database import init_db, close_db
 
@@ -37,6 +38,32 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Database initialized")
 
+    # Initialize OpenTelemetry tracing (if OTEL env vars are configured)
+    try:
+        from cortex.orchestration.observability import initialize_telemetry, is_telemetry_enabled
+        initialize_telemetry(
+            service_name=os.getenv("OTEL_SERVICE_NAME", "cortex-ai"),
+            service_version="0.1.0",
+        )
+        if is_telemetry_enabled():
+            logger.info("OpenTelemetry tracing initialized")
+    except Exception as e:
+        logger.warning(f"OpenTelemetry initialization skipped: {e}")
+
+    # Initialize Langfuse tracing (if keys are configured)
+    langfuse_client = None
+    if os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY"):
+        try:
+            from langfuse import Langfuse
+            langfuse_client = Langfuse(
+                public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
+                secret_key=os.getenv("LANGFUSE_SECRET_KEY"),
+                host=os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com"),
+            )
+            logger.info("Langfuse tracing initialized")
+        except Exception as e:
+            logger.warning(f"Langfuse initialization skipped: {e}")
+
     # Initialize checkpointer for agent session persistence
     try:
         from cortex.orchestration.session.checkpointer import open_checkpointer_pool
@@ -54,6 +81,22 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("Shutting down Cortex-AI Platform API")
+
+    # Flush Langfuse
+    if langfuse_client is not None:
+        try:
+            langfuse_client.flush()
+            logger.info("Langfuse flushed")
+        except Exception as e:
+            logger.warning(f"Langfuse flush failed: {e}")
+
+    # Shutdown OpenTelemetry
+    try:
+        from cortex.orchestration.observability import shutdown_telemetry
+        shutdown_telemetry()
+        logger.info("OpenTelemetry shutdown complete")
+    except Exception as e:
+        logger.warning(f"OpenTelemetry shutdown failed: {e}")
 
     # Close checkpointer
     try:
@@ -129,10 +172,16 @@ def create_app() -> FastAPI:
 
         return response
 
-    # Authentication middleware (only if RBAC is enabled)
-    if settings.rbac_enabled:
-        app.add_middleware(AuthenticationMiddleware)
-        logger.info("Authentication middleware enabled")
+    # Prometheus metrics middleware (optional)
+    from cortex.api.middleware.metrics import is_prometheus_enabled, PrometheusMetricsMiddleware, add_metrics_endpoint
+    if is_prometheus_enabled():
+        app.add_middleware(PrometheusMetricsMiddleware)
+        add_metrics_endpoint(app)
+        logger.info("Prometheus metrics middleware enabled")
+
+    # Authentication middleware (always active — validates JWT and sets request.state.principal)
+    app.add_middleware(AuthenticationMiddleware)
+    logger.info("Authentication middleware enabled")
 
     # Exception handlers
     @app.exception_handler(Exception)
@@ -192,6 +241,12 @@ def create_app() -> FastAPI:
     app.include_router(organizations.router)
     app.include_router(projects.router)
     app.include_router(chat.router)
+    app.include_router(documents.router)
+    app.include_router(prompts.router)
+    app.include_router(agents.router)
+    app.include_router(skills.router)
+    app.include_router(models.router)
+    app.include_router(traces.router)
 
     logger.info("All route handlers registered")
 

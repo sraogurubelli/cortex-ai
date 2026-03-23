@@ -2,10 +2,10 @@
 Cortex-AI: Enterprise-grade AI orchestration platform.
 
 Main modules:
-- core: Agent orchestration, LLM providers, streaming
-- search: RAG and vector search
-- tools: Tool ecosystem and MCP integration
-- storage: Data persistence
+- platform: Authentication, database, config, RBAC
+- orchestration: Agent orchestration, LLM providers, MCP, skills, models
+- tools: Tool ecosystem (document search, code execution)
+- prompts: Jinja2 template registry
 - api: FastAPI application
 """
 

@@ -14,6 +14,11 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph_swarm import create_handoff_tool, create_swarm
 
 from cortex.orchestration.config import AgentConfig, ModelConfig
+from cortex.orchestration.filesystem.middleware import (
+    FilesystemMiddleware,
+    get_filesystem_prompt,
+)
+from cortex.orchestration.filesystem.state import SwarmState
 from cortex.orchestration.llm import LLMClient
 from cortex.orchestration.tools import ToolRegistry
 
@@ -81,6 +86,7 @@ class Swarm:
         model: str | ModelConfig = "gpt-4o",
         default_agent: str | None = None,
         tool_registry: ToolRegistry | None = None,
+        use_filesystem: bool = False,
     ):
         """
         Initialize the swarm.
@@ -90,6 +96,9 @@ class Swarm:
             default_agent: Name of the default starting agent
             tool_registry: Optional tool registry. Defaults to empty registry.
                 Pass ToolRegistry.with_defaults() for a pre-populated registry.
+            use_filesystem: When True, each agent gets a ``FilesystemMiddleware``
+                and the graph uses ``SwarmState`` (with a shared ``files`` dict)
+                instead of plain ``MessagesState``.
         """
         if isinstance(model, str):
             self._default_model = ModelConfig(model=model)
@@ -101,6 +110,7 @@ class Swarm:
         self._tool_registry = (
             tool_registry if tool_registry is not None else ToolRegistry()
         )
+        self._use_filesystem = use_filesystem
 
     # =========================================================================
     # Tool Registry
@@ -276,13 +286,18 @@ class Swarm:
             client = LLMClient(config.model)
             model = client.get_model()
 
-            # Build system prompt
+            # Build system prompt (append filesystem guidance if enabled)
             prompt = config.system_prompt or f"You are {name}. {config.description}"
+            if self._use_filesystem:
+                prompt += "\n\n" + get_filesystem_prompt(name)
 
             # Build kwargs for create_agent
             agent_kwargs: dict[str, Any] = {}
-            if config.middleware:
-                agent_kwargs["middleware"] = config.middleware
+            effective_middleware = list(config.middleware or [])
+            if self._use_filesystem:
+                effective_middleware.insert(0, FilesystemMiddleware())
+            if effective_middleware:
+                agent_kwargs["middleware"] = effective_middleware
 
             # Create agent
             # NOTE: checkpointer is intentionally NOT passed per-agent.
@@ -345,11 +360,14 @@ class Swarm:
         # Build all agents
         agents = self._build_agents()
 
-        # Create swarm
-        workflow = create_swarm(
-            agents,
-            default_active_agent=self._default_agent,
-        )
+        # Create swarm (use SwarmState when filesystem is enabled)
+        swarm_kwargs: dict[str, Any] = {
+            "default_active_agent": self._default_agent,
+        }
+        if self._use_filesystem:
+            swarm_kwargs["state_schema"] = SwarmState
+
+        workflow = create_swarm(agents, **swarm_kwargs)
 
         # Compile with optional checkpointer
         if checkpointer:

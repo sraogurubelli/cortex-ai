@@ -252,6 +252,91 @@ async def login(
     )
 
 
+class RefreshRequest(BaseModel):
+    """Token refresh request."""
+
+    refresh_token: str
+
+
+@router.post("/refresh", response_model=TokenResponse)
+async def refresh_token(
+    request: RefreshRequest,
+    session: AsyncSession = Depends(get_db),
+):
+    """
+    Refresh an access token using a valid refresh token.
+
+    Returns new access and refresh tokens.
+    """
+    settings = get_settings()
+
+    jwt_handler = JWTHandler(
+        secrets=settings.jwt_secrets,
+        algorithm=settings.jwt_algorithm,
+        access_token_expire_minutes=settings.jwt_access_token_expire_minutes,
+        refresh_token_expire_days=settings.jwt_refresh_token_expire_days,
+    )
+
+    try:
+        claims = jwt_handler.verify_token(request.refresh_token)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired refresh token",
+        )
+
+    if claims.token_type != "refresh":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token type",
+        )
+
+    principal_repo = PrincipalRepository(session)
+    principal = await principal_repo.find_by_id(claims.principal_id)
+    if not principal:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+        )
+
+    if principal.blocked:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is blocked",
+        )
+
+    access_token = jwt_handler.create_access_token(
+        principal_id=principal.id,
+        email=principal.email,
+        admin=principal.admin,
+    )
+
+    new_refresh_token = jwt_handler.create_refresh_token(
+        principal_id=principal.id,
+        email=principal.email,
+        admin=principal.admin,
+    )
+
+    return TokenResponse(
+        access_token=access_token,
+        refresh_token=new_refresh_token,
+        expires_in=settings.jwt_access_token_expire_minutes * 60,
+    )
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(
+    principal: Principal = Depends(require_authentication),
+):
+    """
+    Logout the current user.
+
+    For MVP, this is a no-op on the server side (client clears tokens).
+    In production, add token deny-listing via Redis.
+    """
+    return None
+
+
 @router.get("/me", response_model=UserInfo)
 async def get_current_user(
     principal: Principal = Depends(require_authentication),

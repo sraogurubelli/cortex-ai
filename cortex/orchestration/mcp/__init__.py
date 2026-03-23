@@ -1,8 +1,8 @@
 """
 MCP (Model Context Protocol) Support
 
-Provides configuration and loading for MCP servers to extend agent capabilities
-with external tools.
+Provides configuration, loading, and a named server registry for MCP servers
+to extend agent capabilities with external tools.
 """
 
 from .config import (
@@ -14,6 +14,9 @@ from .config import (
     STDIOMCPConfig,
 )
 from .loader import MCPLoader
+from .registry import MCPServerRegistry, mcp_server_registry
+from .rest_gateway import RestToolGateway
+from .hybrid_loader import HybridToolLoader
 
 __all__ = [
     # Config
@@ -25,4 +28,11 @@ __all__ = [
     "MCPAuth",
     # Loader
     "MCPLoader",
+    # Registry
+    "MCPServerRegistry",
+    "mcp_server_registry",
+    # REST Gateway
+    "RestToolGateway",
+    # Hybrid Loader
+    "HybridToolLoader",
 ]

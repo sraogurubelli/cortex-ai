@@ -41,10 +41,19 @@ from .middleware import (
     BaseMiddleware,
     ErrorHandlingMiddleware,
     LoggingMiddleware,
+    MemoryMiddleware,
+    MessageTrimmingMiddleware,
     MiddlewareContext,
     RateLimitMiddleware,
     TimingMiddleware,
+    create_summarization_middleware,
 )
+from .observability.conversation import (
+    dump_conversation_history,
+    serialize_message,
+    serialize_messages,
+)
+from .observability.monitor import SwarmMonitor
 
 # Optional: Session persistence (requires PostgreSQL)
 try:
@@ -72,6 +81,28 @@ from .observability import ModelUsage, ModelUsageTracker, resolve_model_name
 from .streaming import EventType, StreamHandler, StreamWriterProtocol
 from .swarm import Swarm, create_handoff_tool
 from .tools import ToolRegistry
+from .local_tool import create_local_tool, create_tools, local_tool
+from .messages import dicts_to_messages, messages_to_dicts
+from .context import (
+    clear_request_context,
+    get_agent_name,
+    get_conversation_id,
+    get_model_name,
+    get_principal_id,
+    get_project_id,
+    get_request_id,
+    get_stream_writer,
+    get_tenant_id,
+    request_context,
+    set_agent_name,
+    set_conversation_id,
+    set_model_name,
+    set_principal_id,
+    set_project_id,
+    set_request_id,
+    set_stream_writer,
+    set_tenant_id,
+)
 from .validation import (
     format_schema_path,
     get_schema_requirements,
@@ -90,9 +121,11 @@ try:
         MCPAuth,
         MCPConfig,
         MCPLoader,
+        MCPServerRegistry,
         MCPTransport,
         SSEMCPConfig,
         STDIOMCPConfig,
+        mcp_server_registry,
     )
 
     _MCP_AVAILABLE = True
@@ -102,9 +135,11 @@ except ImportError:
     MCPAuth = None
     MCPConfig = None
     MCPLoader = None
+    MCPServerRegistry = None
     MCPTransport = None
     SSEMCPConfig = None
     STDIOMCPConfig = None
+    mcp_server_registry = None
 
 __all__ = [
     # High-level Agent
@@ -133,6 +168,9 @@ __all__ = [
     "TimingMiddleware",
     "ErrorHandlingMiddleware",
     "RateLimitMiddleware",
+    "MemoryMiddleware",
+    "MessageTrimmingMiddleware",
+    "create_summarization_middleware",
     # Streaming
     "StreamHandler",
     "EventType",
@@ -168,8 +206,38 @@ __all__ = [
     "parse_json",
     "format_schema_path",
     "get_schema_requirements",
+    # Observability
+    "serialize_message",
+    "serialize_messages",
+    "dump_conversation_history",
+    "SwarmMonitor",
     # Tools
     "ToolRegistry",
+    "local_tool",
+    "create_local_tool",
+    "create_tools",
+    # Request Context
+    "request_context",
+    "get_tenant_id",
+    "set_tenant_id",
+    "get_project_id",
+    "set_project_id",
+    "get_principal_id",
+    "set_principal_id",
+    "get_conversation_id",
+    "set_conversation_id",
+    "get_stream_writer",
+    "set_stream_writer",
+    "get_request_id",
+    "set_request_id",
+    "get_agent_name",
+    "set_agent_name",
+    "get_model_name",
+    "set_model_name",
+    "clear_request_context",
+    # Message conversion
+    "dicts_to_messages",
+    "messages_to_dicts",
     # Multi-agent
     "Swarm",
     "create_handoff_tool",
@@ -181,4 +249,6 @@ __all__ = [
     "MCPTransport",
     "MCPAuth",
     "MCPLoader",
+    "MCPServerRegistry",
+    "mcp_server_registry",
 ]

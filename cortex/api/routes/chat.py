@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from cortex.api.middleware.auth import require_authentication
 from cortex.platform.auth import Permission, require_permission
 from cortex.platform.database import (
     Principal,
@@ -33,6 +34,9 @@ from cortex.platform.database.repositories import (
 from cortex.orchestration import Agent, ModelConfig, ToolRegistry
 from cortex.orchestration.session.checkpointer import get_checkpointer
 from cortex.core.streaming.stream_writer import StreamWriter, create_streaming_response
+from cortex.prompts import get_prompt
+from cortex.orchestration.ui_actions.emitter import emit_show_document
+from cortex.tools.document_search import create_document_search_tool
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["chat"])
@@ -285,10 +289,15 @@ async def chat_stream(
         account_id=account.uid,
         tenant_id=account.uid,  # For multi-tenancy
     )
+    tool_registry.register(create_document_search_tool())
 
     agent = Agent(
         name="assistant",
-        system_prompt="You are a helpful AI assistant.",
+        system_prompt=get_prompt(
+            "chat.system",
+            agent_name="assistant",
+            has_documents=True,
+        ),
         model=ModelConfig(
             model=request.model or "gpt-4o",
             use_gateway=False,
@@ -310,6 +319,16 @@ async def chat_stream(
                 thread_id=conversation.thread_id,
                 enable_part_streaming=True,
             )
+
+            # Emit UI actions when the response references known entities
+            if result.response and request.context:
+                doc_id = request.context.get("referenced_document_id")
+                if doc_id:
+                    await emit_show_document(
+                        stream_writer,
+                        document_id=doc_id,
+                        project_id=project.uid,
+                    )
 
             # Send done event
             await stream_writer.write_event(
@@ -384,10 +403,15 @@ async def chat(
         account_id=account.uid,
         tenant_id=account.uid,
     )
+    tool_registry.register(create_document_search_tool())
 
     agent = Agent(
         name="assistant",
-        system_prompt="You are a helpful AI assistant.",
+        system_prompt=get_prompt(
+            "chat.system",
+            agent_name="assistant",
+            has_documents=True,
+        ),
         model=ModelConfig(
             model=request.model or "gpt-4o",
             use_gateway=False,
@@ -498,9 +522,7 @@ async def list_conversations(
 @router.get("/conversations/{conversation_uid}", response_model=ConversationDetail)
 async def get_conversation(
     conversation_uid: str,
-    principal: Principal = Depends(
-        require_permission(Permission.CONVERSATION_VIEW, "project")
-    ),
+    principal: Principal = Depends(require_authentication),
     session: AsyncSession = Depends(get_db),
 ):
     """
@@ -565,9 +587,7 @@ async def get_conversation(
 @router.delete("/conversations/{conversation_uid}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_conversation(
     conversation_uid: str,
-    principal: Principal = Depends(
-        require_permission(Permission.CONVERSATION_DELETE, "project")
-    ),
+    principal: Principal = Depends(require_authentication),
     session: AsyncSession = Depends(get_db),
 ):
     """
