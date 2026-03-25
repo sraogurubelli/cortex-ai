@@ -1,251 +1,253 @@
 """
-Conversation Replay — record and replay full conversations for regression testing.
+Conversation replay infrastructure for reproducing and evaluating
+multi-turn conversations.
 
-Records the request/response pairs from a live conversation and saves them
-to a JSON file.  On replay, the recorded inputs are sent to the API and the
-new outputs are compared against the recorded outputs.
+Load a recorded conversation corpus and replay it against a live
+endpoint to detect regressions, measure quality drift, and compare
+model performance.
 
 Usage::
 
-    from evals.replay import ConversationRecorder, replay_conversation
+    from evals.replay import ReplayRunner, ConversationCorpus
 
-    # Recording a conversation
-    recorder = ConversationRecorder(conversation_name="onboarding-flow")
-    recorder.add_turn(
-        message="How do I create a project?",
-        response="To create a project, navigate to...",
-        metadata={"model": "gpt-4o", "latency_ms": 1200},
-    )
-    recorder.save("evals/recordings/onboarding.json")
-
-    # Replaying and comparing
-    results = await replay_conversation(
-        recording_path="evals/recordings/onboarding.json",
+    corpus = ConversationCorpus.from_json("test_conversations.json")
+    runner = ReplayRunner(
         base_url="http://localhost:8000",
-        project_uid="proj-123",
+        endpoint="/api/v1/projects/default/chat",
     )
-    for turn in results:
-        print(f"Turn {turn['index']}: {'MATCH' if turn['match'] else 'DIFF'}")
+    report = await runner.replay(corpus)
 """
+
+from __future__ import annotations
 
 import json
 import logging
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
-
-import aiohttp
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Recording
-# ---------------------------------------------------------------------------
 
 
 @dataclass
 class ConversationTurn:
     """A single turn in a recorded conversation."""
 
-    index: int
-    message: str
-    response: str
+    role: str  # "user" or "assistant"
+    content: str
+    expected_keywords: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class ConversationRecording:
-    """A full recorded conversation."""
+class RecordedConversation:
+    """A complete recorded conversation for replay."""
 
-    name: str
-    turns: list[ConversationTurn] = field(default_factory=list)
+    id: str
+    turns: list[ConversationTurn]
+    system_prompt: str = ""
+    model: str = ""
+    tags: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-class ConversationRecorder:
-    """Records conversation turns for later replay.
+class ConversationCorpus:
+    """Collection of recorded conversations for bulk replay."""
 
-    Args:
-        conversation_name: Human-readable name for the recording.
-    """
+    def __init__(self, conversations: list[RecordedConversation]) -> None:
+        self.conversations = conversations
 
-    def __init__(self, conversation_name: str = "unnamed"):
-        self._recording = ConversationRecording(name=conversation_name)
-        self._index = 0
+    @classmethod
+    def from_json(cls, path: str) -> "ConversationCorpus":
+        """Load a corpus from a JSON file.
 
-    def add_turn(
-        self,
-        message: str,
-        response: str,
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
-        """Record a single conversation turn."""
-        self._recording.turns.append(
-            ConversationTurn(
-                index=self._index,
-                message=message,
-                response=response,
-                metadata=metadata or {},
-            )
-        )
-        self._index += 1
+        Expected format::
 
-    def save(self, path: str | Path) -> None:
-        """Save the recording to a JSON file."""
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-
-        data = {
-            "name": self._recording.name,
-            "metadata": self._recording.metadata,
-            "turns": [
+            [
                 {
-                    "index": t.index,
-                    "message": t.message,
-                    "response": t.response,
-                    "metadata": t.metadata,
+                    "id": "conv-1",
+                    "system_prompt": "You are helpful",
+                    "turns": [
+                        {"role": "user", "content": "Hello"},
+                        {"role": "assistant", "content": "Hi there!", "expected_keywords": ["hi"]},
+                        {"role": "user", "content": "What is Python?"},
+                        {"role": "assistant", "content": "...", "expected_keywords": ["language"]}
+                    ]
                 }
-                for t in self._recording.turns
-            ],
-        }
+            ]
+        """
+        with open(path, "r") as f:
+            data = json.load(f)
 
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2)
-        logger.info("Recording saved to %s (%d turns)", path, len(self._recording.turns))
+        conversations = []
+        for entry in data:
+            turns = [
+                ConversationTurn(
+                    role=t["role"],
+                    content=t["content"],
+                    expected_keywords=t.get("expected_keywords", []),
+                    metadata=t.get("metadata", {}),
+                )
+                for t in entry.get("turns", [])
+            ]
+            conversations.append(RecordedConversation(
+                id=entry.get("id", ""),
+                turns=turns,
+                system_prompt=entry.get("system_prompt", ""),
+                model=entry.get("model", ""),
+                tags=entry.get("tags", []),
+                metadata=entry.get("metadata", {}),
+            ))
+        return cls(conversations)
 
+    def filter_by_tag(self, tag: str) -> "ConversationCorpus":
+        """Filter conversations by tag."""
+        filtered = [c for c in self.conversations if tag in c.tags]
+        return ConversationCorpus(filtered)
 
-def load_recording(path: str | Path) -> ConversationRecording:
-    """Load a conversation recording from a JSON file."""
-    with open(path, "r") as f:
-        data = json.load(f)
-
-    return ConversationRecording(
-        name=data.get("name", "unnamed"),
-        metadata=data.get("metadata", {}),
-        turns=[
-            ConversationTurn(
-                index=t["index"],
-                message=t["message"],
-                response=t["response"],
-                metadata=t.get("metadata", {}),
-            )
-            for t in data.get("turns", [])
-        ],
-    )
-
-
-# ---------------------------------------------------------------------------
-# Replay
-# ---------------------------------------------------------------------------
+    def __len__(self) -> int:
+        return len(self.conversations)
 
 
 @dataclass
 class ReplayTurnResult:
     """Result of replaying a single conversation turn."""
 
-    index: int
-    message: str
-    expected_response: str
-    actual_response: str
-    match: bool
-    similarity_score: float
-    latency_ms: float
-    error: str | None = None
+    turn_index: int
+    expected_role: str
+    actual_response: str = ""
+    latency_ms: int = 0
+    keyword_matches: list[str] = field(default_factory=list)
+    keyword_misses: list[str] = field(default_factory=list)
+    passed: bool = False
+    error: Optional[str] = None
 
 
-async def replay_conversation(
-    recording_path: str | Path,
-    base_url: str = "http://localhost:8000",
-    project_uid: str = "default",
-    auth_token: str | None = None,
-    similarity_threshold: float = 0.5,
-) -> list[ReplayTurnResult]:
-    """Replay a recorded conversation and compare outputs.
+@dataclass
+class ReplayResult:
+    """Result of replaying a complete conversation."""
 
-    Each turn is sent sequentially (maintaining conversation context via
-    ``conversation_id``).  The new response is compared against the
-    recorded response using word-overlap similarity.
+    conversation_id: str
+    turn_results: list[ReplayTurnResult] = field(default_factory=list)
+    total_latency_ms: int = 0
 
-    Args:
-        recording_path: Path to the recording JSON file.
-        base_url: Cortex-AI server URL.
-        project_uid: Project UID for the chat API.
-        auth_token: Optional Bearer token.
-        similarity_threshold: Minimum similarity to consider a "match".
+    @property
+    def passed(self) -> bool:
+        return all(t.passed for t in self.turn_results)
 
-    Returns:
-        List of ``ReplayTurnResult`` for each turn.
-    """
-    recording = load_recording(recording_path)
-    results: list[ReplayTurnResult] = []
-    conversation_id: str | None = None
+    @property
+    def pass_rate(self) -> float:
+        if not self.turn_results:
+            return 0.0
+        return sum(1 for t in self.turn_results if t.passed) / len(self.turn_results)
 
-    headers: dict[str, str] = {"Content-Type": "application/json"}
-    if auth_token:
-        headers["Authorization"] = f"Bearer {auth_token}"
 
-    async with aiohttp.ClientSession() as session:
-        for turn in recording.turns:
-            start = time.monotonic()
-            try:
-                payload: dict[str, Any] = {
-                    "message": turn.message,
-                    "stream": False,
-                }
-                if conversation_id:
-                    payload["conversation_id"] = conversation_id
+class ReplayRunner:
+    """Replays recorded conversations against a live endpoint."""
 
-                url = f"{base_url}/api/v1/projects/{project_uid}/chat"
-                async with session.post(
-                    url,
-                    json=payload,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=60),
-                ) as resp:
-                    latency = (time.monotonic() - start) * 1000
-                    body = await resp.json()
+    def __init__(
+        self,
+        base_url: str = "http://localhost:8000",
+        endpoint: str = "/api/v1/projects/default/chat",
+        model: str = "",
+        auth_token: str = "",
+        timeout_seconds: int = 60,
+    ) -> None:
+        self.base_url = base_url
+        self.endpoint = endpoint
+        self.model = model
+        self.auth_token = auth_token
+        self.timeout_seconds = timeout_seconds
 
-                    actual = body.get("response", body.get("message", ""))
-                    conversation_id = body.get("conversation_id", conversation_id)
+    async def replay(self, corpus: ConversationCorpus) -> list[ReplayResult]:
+        """Replay all conversations in the corpus.
 
-            except Exception as exc:
-                latency = (time.monotonic() - start) * 1000
-                results.append(
-                    ReplayTurnResult(
-                        index=turn.index,
-                        message=turn.message,
-                        expected_response=turn.response,
-                        actual_response="",
-                        match=False,
-                        similarity_score=0.0,
-                        latency_ms=latency,
-                        error=str(exc),
-                    )
-                )
-                continue
+        Returns a list of ReplayResult, one per conversation.
+        """
+        results = []
+        for conv in corpus.conversations:
+            result = await self._replay_conversation(conv)
+            results.append(result)
+        return results
 
-            sim = _word_overlap_similarity(turn.response, actual)
-            results.append(
-                ReplayTurnResult(
-                    index=turn.index,
-                    message=turn.message,
-                    expected_response=turn.response,
-                    actual_response=actual,
-                    match=sim >= similarity_threshold,
-                    similarity_score=sim,
-                    latency_ms=latency,
-                )
+    async def _replay_conversation(self, conv: RecordedConversation) -> ReplayResult:
+        """Replay a single conversation turn by turn."""
+        try:
+            import httpx
+        except ImportError:
+            return ReplayResult(
+                conversation_id=conv.id,
+                turn_results=[ReplayTurnResult(
+                    turn_index=0, expected_role="user",
+                    error="httpx not installed",
+                )],
             )
 
-    return results
+        result = ReplayResult(conversation_id=conv.id)
+        history: list[dict] = []
+        total_start = time.monotonic()
 
+        url = f"{self.base_url.rstrip('/')}{self.endpoint}"
+        headers = {"Content-Type": "application/json"}
+        if self.auth_token:
+            headers["Authorization"] = f"Bearer {self.auth_token}"
 
-def _word_overlap_similarity(a: str, b: str) -> float:
-    """Jaccard word-overlap similarity between two strings."""
-    words_a = set(a.lower().split())
-    words_b = set(b.lower().split())
-    if not words_a or not words_b:
-        return 0.0
-    return len(words_a & words_b) / len(words_a | words_b)
+        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+            for i, turn in enumerate(conv.turns):
+                if turn.role == "user":
+                    start = time.monotonic()
+                    payload: dict[str, Any] = {
+                        "message": turn.content,
+                        "conversation_history": history,
+                    }
+                    if conv.system_prompt:
+                        payload["system_prompt"] = conv.system_prompt
+                    model = conv.model or self.model
+                    if model:
+                        payload["model"] = model
+
+                    try:
+                        resp = await client.post(url, json=payload, headers=headers)
+                        latency = int((time.monotonic() - start) * 1000)
+
+                        if resp.status_code != 200:
+                            result.turn_results.append(ReplayTurnResult(
+                                turn_index=i, expected_role="user",
+                                latency_ms=latency,
+                                error=f"HTTP {resp.status_code}",
+                            ))
+                            break
+
+                        data = resp.json()
+                        response_text = data.get("response", "")
+                        history.append({"role": "user", "content": turn.content})
+                        history.append({"role": "assistant", "content": response_text})
+
+                    except Exception as e:
+                        latency = int((time.monotonic() - start) * 1000)
+                        result.turn_results.append(ReplayTurnResult(
+                            turn_index=i, expected_role="user",
+                            latency_ms=latency, error=str(e),
+                        ))
+                        break
+
+                elif turn.role == "assistant":
+                    actual = history[-1]["content"] if history else ""
+                    response_lower = actual.lower()
+
+                    matches = [kw for kw in turn.expected_keywords if kw.lower() in response_lower]
+                    misses = [kw for kw in turn.expected_keywords if kw.lower() not in response_lower]
+
+                    passed = len(misses) == 0 if turn.expected_keywords else True
+
+                    result.turn_results.append(ReplayTurnResult(
+                        turn_index=i,
+                        expected_role="assistant",
+                        actual_response=actual[:500],
+                        keyword_matches=matches,
+                        keyword_misses=misses,
+                        passed=passed,
+                    ))
+
+        result.total_latency_ms = int((time.monotonic() - total_start) * 1000)
+        return result

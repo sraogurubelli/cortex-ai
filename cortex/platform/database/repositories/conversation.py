@@ -113,6 +113,39 @@ class ConversationRepository(BaseRepository[Conversation]):
         conversation.title = title
         return await self.update(conversation)
 
+    async def search(
+        self,
+        project_id: int,
+        query: str,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[Conversation], int]:
+        """Search conversations by title using ILIKE.
+
+        Returns (matching_conversations, total_count).
+        """
+        from sqlalchemy import func as sa_func
+
+        pattern = f"%{query}%"
+
+        base = select(Conversation).where(
+            Conversation.project_id == project_id,
+            Conversation.title.ilike(pattern),
+        )
+        count_q = select(sa_func.count(Conversation.id)).where(
+            Conversation.project_id == project_id,
+            Conversation.title.ilike(pattern),
+        )
+
+        total = (await self.session.execute(count_q)).scalar_one()
+
+        results = await self.session.execute(
+            base.order_by(desc(Conversation.updated_at))
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(results.scalars().all()), total
+
     async def find_by_project_and_principal(
         self,
         project_id: int,

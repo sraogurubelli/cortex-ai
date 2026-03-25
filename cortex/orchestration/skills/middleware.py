@@ -2,7 +2,9 @@
 Skills middleware — injects discovered skill instructions into agent context.
 
 Lightweight replacement for deepagents.SkillsMiddleware that works
-with the cortex middleware pipeline.
+with the cortex middleware pipeline. Supports hierarchical skill
+directories (global + category-specific) matching ml-infra's
+``build_skills_middleware(module)`` pattern.
 """
 
 import logging
@@ -21,9 +23,16 @@ class SkillsMiddleware:
     triggers and injects matching skill content as a system-level context
     block.
 
+    Supports hierarchical skill directories:
+      - ``global/`` skills are always loaded
+      - Category-specific skills (e.g. ``ci/``, ``cd/``, ``ccm/``) are loaded
+        based on the ``category`` or ``categories`` parameter
+
     Args:
         skills_dir: Root skills directory. Defaults to ``cortex/skills/``.
-        category: Skill category to load alongside global.
+        category: Single skill category to load alongside global.
+        categories: Multiple skill categories to load alongside global
+            (takes precedence over ``category``).
         always_include_global: Whether to always inject global skill content
             regardless of trigger matches (default True).
     """
@@ -32,12 +41,33 @@ class SkillsMiddleware:
         self,
         skills_dir: Optional[Path] = None,
         category: Optional[str] = None,
+        categories: Optional[list[str]] = None,
         always_include_global: bool = True,
     ):
-        self._skills = discover_skills(skills_dir=skills_dir, category=category)
+        self._skills_dir = skills_dir
+        self._skills = discover_skills(
+            skills_dir=skills_dir,
+            category=category,
+            categories=categories,
+        )
         self._always_global = always_include_global
         logger.info(
             "SkillsMiddleware initialized with %d skills", len(self._skills)
+        )
+
+    def reload_for_category(self, category: str) -> None:
+        """Reload skills for a different category (e.g. after intent detection).
+
+        Useful for dynamically switching skill sets when the detected
+        module changes mid-session.
+        """
+        self._skills = discover_skills(
+            skills_dir=self._skills_dir,
+            category=category,
+        )
+        logger.info(
+            "SkillsMiddleware reloaded for category=%s (%d skills)",
+            category, len(self._skills),
         )
 
     @property

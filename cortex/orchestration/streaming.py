@@ -22,7 +22,8 @@ from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 class EventType:
     """Event types for SSE streaming.
 
-    These match the existing /chat/unified implementation.
+    These match the existing /chat/unified implementation and include
+    additional types ported from ml-infra for rich MCP progress streaming.
     """
 
     ASSISTANT_MESSAGE = "assistant_message"
@@ -40,6 +41,20 @@ class EventType:
 
     # ARCHITECT mode
     DETAILED_ANALYSIS = "detailed_analysis"
+
+    # Chat extensions
+    TYPING_INDICATOR = "typing_indicator"
+    CITATION = "citation"
+    UI_ACTION = "ui_action"
+    UI_ACTION_UPDATE = "ui_action_update"
+    COLLECT_FEEDBACK = "collect_feedback"
+    STATUS = "status"
+
+    # MCP progress events (ported from ml-infra)
+    PLAN_PRESENTED = "plan_presented"
+    CAPABILITY_EXECUTION = "capability_execution"
+    FINAL_YAML_CREATED = "final_yaml_created"
+    KG_INSIGHTS = "kg_insights"
 
 
 # =========================================================================

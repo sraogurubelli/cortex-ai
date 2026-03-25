@@ -91,13 +91,19 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
 def discover_skills(
     skills_dir: Optional[Path] = None,
     category: Optional[str] = None,
+    categories: Optional[list[str]] = None,
 ) -> list[SkillDefinition]:
     """Scan a directory tree for SKILL.md files and return parsed definitions.
 
+    Supports hierarchical skill directories: ``global/`` skills are always
+    included, plus any category-specific directories. This mirrors
+    ml-infra's ``build_skills_middleware(module)`` pattern.
+
     Args:
         skills_dir: Root directory to scan. Defaults to ``cortex/skills/``.
-        category: If given, also include skills from ``skills_dir/<category>/``
-                  in addition to ``skills_dir/global/``.
+        category: Single category to include alongside global.
+        categories: Multiple categories to include (takes precedence
+            over ``category`` when both are given).
 
     Returns:
         List of discovered SkillDefinition objects.
@@ -111,12 +117,19 @@ def discover_skills(
     if global_dir.is_dir():
         dirs_to_scan.append((global_dir, "global"))
 
-    if category:
-        cat_dir = root / category.lower()
+    # Resolve the list of categories to scan
+    cats: list[str] = []
+    if categories:
+        cats = list(categories)
+    elif category:
+        cats = [category]
+
+    for cat_name in cats:
+        cat_dir = root / cat_name.lower()
         if cat_dir.is_dir():
-            dirs_to_scan.append((cat_dir, category.lower()))
+            dirs_to_scan.append((cat_dir, cat_name.lower()))
         else:
-            logger.debug("No skills directory for category %s at %s", category, cat_dir)
+            logger.debug("No skills directory for category %s at %s", cat_name, cat_dir)
 
     for scan_dir, cat in dirs_to_scan:
         for skill_md in sorted(scan_dir.rglob("SKILL.md")):
@@ -144,5 +157,8 @@ def discover_skills(
                 )
             )
 
-    logger.info("Discovered %d skills from %s (category=%s)", len(skills), root, category)
+    logger.info(
+        "Discovered %d skills from %s (categories=%s)",
+        len(skills), root, cats or [category],
+    )
     return skills

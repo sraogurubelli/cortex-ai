@@ -22,6 +22,13 @@ class StreamWriter:
 
     Manages an async queue of events and provides an async iterator
     interface for streaming events to clients.
+
+    Features (ported from ml-infra StreamWriter):
+      - Bounded queue with overflow drop (oldest dropped first)
+      - Event size truncation for oversized payloads
+      - Sequential event numbering for client ordering
+      - Prompt buffering: ``prompts`` events are held back and flushed
+        after the final message so they appear at the end of the stream
     """
 
     def __init__(
@@ -40,6 +47,8 @@ class StreamWriter:
         self._closed = False
         self.max_event_size_kb = max_event_size_kb
         self.max_event_size_bytes = max_event_size_kb * 1024
+        self._event_sequence: int = 0
+        self._buffered_prompts: list[dict] = []
 
     async def write_event(
         self,
@@ -49,6 +58,9 @@ class StreamWriter:
         """
         Write an event to the stream.
 
+        Events of type ``prompts`` are buffered internally until
+        ``flush_prompts()`` is called (typically after the final message).
+
         Args:
             event_type: Type of event (message, status, progress, error, etc.)
             data: Event data (will be JSON-encoded if not a string)
@@ -56,8 +68,11 @@ class StreamWriter:
         if self._closed:
             raise RuntimeError("Cannot write to a closed stream")
 
+        # Assign sequential event number
+        self._event_sequence += 1
+
         # Create event object
-        event = {"event": event_type, "data": data}
+        event = {"event": event_type, "data": data, "seq": self._event_sequence}
 
         # Convert data to JSON if not a string
         if not isinstance(data, str):
@@ -76,6 +91,11 @@ class StreamWriter:
                     max_size_kb=self.max_event_size_kb,
                 )
 
+        # Buffer prompt events to emit them after the final message
+        if event_type == "prompts":
+            self._buffered_prompts.append(event)
+            return
+
         logger.debug(
             "Writing event to stream",
             event_type=event_type,
@@ -92,6 +112,21 @@ class StreamWriter:
 
         # Add to queue
         await self._queue.put(event)
+
+    async def flush_prompts(self) -> None:
+        """Flush buffered ``prompts`` events into the stream.
+
+        Call this after the final assistant message so prompt metadata
+        appears at the end of the SSE stream (matching ml-infra behavior).
+        """
+        for event in self._buffered_prompts:
+            if self._queue.full():
+                try:
+                    self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            await self._queue.put(event)
+        self._buffered_prompts.clear()
 
     async def write_message(self, content: str) -> None:
         """

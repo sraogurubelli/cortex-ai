@@ -11,9 +11,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import text as select_text
 
 from cortex.api.middleware.auth import AuthenticationMiddleware
-from cortex.api.routes import auth, accounts, organizations, projects, chat, documents, prompts, agents, skills, models, traces
+from cortex.api.routes import (
+    auth, accounts, organizations, projects, chat, chat_extensions,
+    documents, prompts, agents, skills, models, traces,
+    api_keys, audit_logs, usage, feature_flags, webhooks,
+)
 from cortex.platform.config.settings import get_settings
 from cortex.platform.database import init_db, close_db
 
@@ -183,6 +188,22 @@ def create_app() -> FastAPI:
     app.add_middleware(AuthenticationMiddleware)
     logger.info("Authentication middleware enabled")
 
+    # Rate limiting middleware (Redis-backed, per-principal/IP)
+    try:
+        from cortex.api.middleware.rate_limit import RateLimitMiddleware
+        app.add_middleware(RateLimitMiddleware)
+        logger.info("Rate limiting middleware enabled")
+    except Exception as e:
+        logger.warning(f"Rate limiting middleware skipped: {e}")
+
+    # Audit logging middleware (records mutations to audit_logs table)
+    try:
+        from cortex.api.middleware.audit import AuditMiddleware
+        app.add_middleware(AuditMiddleware)
+        logger.info("Audit logging middleware enabled")
+    except Exception as e:
+        logger.warning(f"Audit middleware skipped: {e}")
+
     # Exception handlers
     @app.exception_handler(Exception)
     async def global_exception_handler(request: Request, exc: Exception):
@@ -205,20 +226,70 @@ def create_app() -> FastAPI:
             }
         )
 
-    # Health check endpoint
+    # Health check endpoint (liveness)
     @app.get("/health", tags=["health"])
     async def health_check():
-        """
-        Health check endpoint.
-
-        Returns:
-            Health status of the service
-        """
+        """Lightweight liveness probe -- always returns 200 if the process is up."""
         return {
             "status": "healthy",
             "service": "cortex-ai-platform",
             "version": "0.1.0",
         }
+
+    # Deep readiness probe (checks all backends)
+    @app.get("/ready", tags=["health"])
+    async def readiness_check():
+        """Deep readiness probe that verifies DB, Redis, Qdrant, and checkpointer connectivity."""
+        import time as _time
+
+        checks: dict = {}
+        overall = True
+        start = _time.monotonic()
+
+        # Database (PostgreSQL)
+        try:
+            from cortex.platform.database.session import get_db_manager
+            db = get_db_manager()
+            async with db.session() as session:
+                await session.execute(select_text("SELECT 1"))
+            checks["database"] = {"status": "ok"}
+        except Exception as e:
+            checks["database"] = {"status": "error", "detail": str(e)[:200]}
+            overall = False
+
+        # Redis
+        try:
+            import redis.asyncio as aioredis
+            r = aioredis.from_url(settings.redis_url, socket_connect_timeout=2)
+            await r.ping()
+            await r.aclose()
+            checks["redis"] = {"status": "ok"}
+        except Exception as e:
+            checks["redis"] = {"status": "error", "detail": str(e)[:200]}
+            overall = False
+
+        # Checkpointer (LangGraph state DB)
+        try:
+            from cortex.orchestration.session.checkpointer import is_checkpointer_healthy
+            healthy = await is_checkpointer_healthy()
+            checks["checkpointer"] = {"status": "ok" if healthy else "degraded"}
+            if not healthy:
+                overall = False
+        except Exception as e:
+            checks["checkpointer"] = {"status": "error", "detail": str(e)[:200]}
+            overall = False
+
+        elapsed_ms = int((_time.monotonic() - start) * 1000)
+
+        payload = {
+            "status": "ready" if overall else "not_ready",
+            "checks": checks,
+            "elapsed_ms": elapsed_ms,
+        }
+
+        if not overall:
+            return JSONResponse(status_code=503, content=payload)
+        return payload
 
     @app.get("/", tags=["root"])
     async def root():
@@ -241,12 +312,18 @@ def create_app() -> FastAPI:
     app.include_router(organizations.router)
     app.include_router(projects.router)
     app.include_router(chat.router)
+    app.include_router(chat_extensions.router)
     app.include_router(documents.router)
     app.include_router(prompts.router)
     app.include_router(agents.router)
     app.include_router(skills.router)
     app.include_router(models.router)
     app.include_router(traces.router)
+    app.include_router(api_keys.router)
+    app.include_router(audit_logs.router)
+    app.include_router(usage.router)
+    app.include_router(feature_flags.router)
+    app.include_router(webhooks.router)
 
     logger.info("All route handlers registered")
 

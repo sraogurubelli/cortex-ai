@@ -187,6 +187,10 @@ class AgentConfig:
     # Example: suppress_events={"assistant_message", "tool_request", "tool_result"}
     suppress_events: set[str] = field(default_factory=set)
 
+    # When True, handoff to this agent summarizes the conversation to reduce
+    # context size. Ported from ml-infra's orchestration_sdk pattern.
+    use_summarizing_handoff: bool = False
+
     # Advanced agent options (optional, passed through to create_agent)
     # AgentMiddleware instances for tool call wrapping, model hooks, etc.
     middleware: Sequence[Any] = field(default_factory=list)

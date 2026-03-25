@@ -1,14 +1,9 @@
 """
-Cortex-AI Evaluation & Benchmark Framework.
+Cortex-AI Evaluation Framework.
 
-Provides tools for evaluating chat quality, RAG retrieval accuracy,
-and running regression tests via conversation replay.
-
-Modules:
-
-- ``runner`` — Generic benchmark runner that calls the cortex-ai chat API
-  with test inputs and records outputs.
-- ``metrics`` — Pluggable evaluation metrics (semantic similarity,
-  retrieval recall, answer relevance, latency).
-- ``replay`` — Record and replay full conversations for regression testing.
+Ported from ml-infra's ``evals/`` pattern. Provides:
+  - Generic HTTP-based benchmark runner
+  - Replay infrastructure for reproducing conversations
+  - CSV/JSON report generation
+  - Model comparison utilities
 """

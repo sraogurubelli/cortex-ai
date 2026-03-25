@@ -28,6 +28,18 @@ Cortex-AI is a standalone, open-source platform extracted from production system
 - 🎯 **Middleware System** - Pre/post hooks for LLM/tool calls
 - 🔁 **Retry & Rate Limiting** - Production reliability
 
+### Chat Interaction ✅ Complete
+- 📎 **Attachments** - File references on chat messages
+- 🏷️ **Smart Titles** - LLM-generated conversation titles
+- 🔍 **Search** - Full-text search across conversations
+- 👍 **Ratings** - Thumbs up/down with feedback per message
+- 📥 **Export** - JSON and Markdown conversation export
+- 🔄 **Regeneration** - Replay from any user message
+- ⏹️ **Stop** - Cancel in-progress generation
+- 🔗 **UI Actions** - Frontend continuations (navigate, create entity)
+- 📝 **Citations** - Structured source attribution from RAG
+- 🛡️ **Safety** - Input/output guardrails, PII redaction, token budget
+
 ### RAG Module ✅ Complete
 - 🔍 **Semantic Search** - Qdrant vector database
 - 🧠 **Embedding Service** - OpenAI with Redis caching (90% cost savings)
@@ -43,7 +55,7 @@ Cortex-AI is a standalone, open-source platform extracted from production system
 - 🔀 **Hybrid GraphRAG** - Vector + graph search with RRF fusion
 - 🎯 **Multi-Tenancy** - Tenant-isolated knowledge graphs
 
-### Future Roadmap
+### Planned
 - 📊 **Analytics Layer** - StarRocks OLAP for real-time analytics
 - 📡 **Event Streaming** - Kafka integration for async workflows
 
@@ -198,41 +210,54 @@ result = await agent.run("Tell me about Python")
 ```
 cortex-ai/
 ├── cortex/
+│   ├── api/                        # FastAPI application
+│   │   ├── main.py                # App factory, middleware, lifespan
+│   │   ├── middleware/            # Auth (JWT), metrics (Prometheus)
+│   │   └── routes/
+│   │       ├── chat.py            # Core chat endpoints (stream, sync)
+│   │       ├── chat_extensions.py # Search, ratings, export, regenerate, stop
+│   │       ├── documents.py       # Document upload and RAG ingestion
+│   │       ├── agents.py          # Agent CRUD
+│   │       ├── skills.py          # Skill management
+│   │       └── ...                # auth, accounts, orgs, projects, models, traces
+│   │
 │   ├── orchestration/              # Agent orchestration SDK
 │   │   ├── agent.py               # High-level Agent API
 │   │   ├── swarm.py               # Multi-agent swarm
 │   │   ├── llm.py                 # LLM provider clients
 │   │   ├── tools.py               # Tool registry with context injection
-│   │   ├── streaming.py           # SSE streaming
-│   │   ├── caching/               # Prompt caching
-│   │   ├── compression.py         # Conversation compression
-│   │   ├── middleware/            # Middleware system
-│   │   ├── session/               # Session persistence
-│   │   ├── observability/         # OpenTelemetry
+│   │   ├── streaming.py           # SSE streaming + event types
+│   │   ├── caching/               # Prompt caching (Anthropic, Google, OpenAI)
+│   │   ├── middleware/            # Middleware system (memory, summarization)
+│   │   ├── session/               # SessionOrchestrator + checkpointer
+│   │   ├── safety/                # Guardrails, PII redaction, token budget
+│   │   ├── skills/                # Progressive skill disclosure (SKILL.md)
+│   │   ├── memory/                # Semantic memory (cross-session)
+│   │   ├── ui_actions/            # UI action schemas, emitters, continuations
+│   │   ├── observability/         # OpenTelemetry + Langfuse
 │   │   └── mcp/                   # MCP protocol support
 │   │
-│   └── rag/                       # RAG Module
+│   ├── platform/                   # Platform services
+│   │   ├── auth/                  # RBAC, permissions, JWT
+│   │   ├── config/                # Settings (env-driven)
+│   │   └── database/             # SQLAlchemy models + repositories
+│   │
+│   ├── prompts/                    # Jinja2 prompt registry
+│   ├── tools/                      # Built-in tools (doc search, code exec)
+│   └── rag/                        # RAG Module
 │       ├── embeddings.py          # Embedding service (OpenAI + Redis)
 │       ├── vector_store.py        # Qdrant vector database
 │       ├── document.py            # Document lifecycle
-│       └── retriever.py           # Semantic search
+│       ├── retriever.py           # Semantic search
+│       └── graph_rag/             # Neo4j knowledge graph RAG
 │
 ├── examples/                       # Comprehensive examples
-│   ├── orchestration_demo.py      # Basic agent demos
-│   ├── swarm_demo.py              # Multi-agent demos
-│   ├── advanced_features_demo.py  # Advanced features
-│   ├── test_caching.py            # Prompt caching
-│   ├── test_compression.py        # Conversation compression
-│   ├── test_session_persistence.py # Session persistence
-│   ├── test_middleware.py         # Middleware
-│   ├── test_telemetry.py          # OpenTelemetry
-│   └── test_rag.py                # RAG demos
-│
 ├── docs/                           # Documentation
+│   ├── CHAT_API.md                # Chat interaction API reference
 │   ├── ORCHESTRATION_ARCHITECTURE.md  # Architecture guide
 │   ├── QUICK_START.md             # Getting started
 │   ├── RAG.md                     # RAG documentation
-│   └── COMPLETION_SUMMARY.md      # Implementation summary
+│   └── ...                        # Memory, GraphRAG, prompt caching guides
 │
 ├── requirements.txt                # Dependencies
 └── README.md                       # This file
@@ -389,6 +414,7 @@ Total: **52+ individual demos** across 10 example files
 
 Comprehensive documentation with 35,000+ words:
 
+- **[CHAT_API.md](docs/CHAT_API.md)** - Chat interaction API reference (endpoints, SSE events, schemas, safety)
 - **[ORCHESTRATION_ARCHITECTURE.md](docs/ORCHESTRATION_ARCHITECTURE.md)** - 12,000-word architecture deep dive
 - **[QUICK_START.md](docs/QUICK_START.md)** - 5-minute getting started guide
 - **[RAG.md](docs/RAG.md)** - Complete RAG documentation
@@ -425,12 +451,29 @@ Comprehensive documentation with 35,000+ words:
 - [x] Semantic and hybrid search
 - [x] Multi-tenancy support
 
-### 🚧 Phase 3 - Advanced Features (Planned)
-- [ ] FastAPI REST API layer
-- [ ] WebSocket/SSE streaming endpoints
-- [ ] Authentication and authorization
+### ✅ Phase 3 - Platform API & Security (Complete)
+- [x] FastAPI REST API layer with RBAC
+- [x] SSE streaming endpoints (part streaming, full message)
+- [x] JWT authentication and project-level authorization
+- [x] SessionOrchestrator (checkpoint health, message dedup, Langfuse spans)
+- [x] Knowledge graph integration (Neo4j GraphRAG)
+- [x] Safety & guardrails (input/output guardrails, PII redaction, token budget)
+- [x] Trace sanitization for observability tools
+
+### ✅ Phase 4 - Complete Chat Interaction (Complete)
+- [x] Chat attachments (file references on messages)
+- [x] LLM-based conversation title generation
+- [x] Conversation search (full-text on titles + message content)
+- [x] Message ratings / reactions (thumbs up/down with feedback)
+- [x] Conversation export (JSON and Markdown)
+- [x] Message regeneration (replay from a specific point)
+- [x] Stop/cancel in-progress generation
+- [x] System events / UI action continuations
+- [x] Typing indicators + structured citations in SSE
+- [x] Skills middleware + semantic memory wired into orchestrator
+
+### 🚧 Phase 5 - Scale & Analytics (Planned)
 - [ ] Unit and integration tests (90%+ coverage)
-- [ ] Knowledge graph integration (Neo4j)
 - [ ] Analytics layer (StarRocks OLAP)
 - [ ] Event streaming (Kafka)
 - [ ] Dashboard generation

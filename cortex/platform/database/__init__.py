@@ -31,6 +31,12 @@ from cortex.platform.database.models import (
     # Conversations & Messages
     Conversation,
     Message,
+    # Platform
+    AuditLog,
+    UsageRecord,
+    FeatureFlag,
+    Webhook,
+    WebhookDelivery,
 )
 from cortex.platform.database.session import (
     DatabaseManager,
@@ -71,6 +77,12 @@ __all__ = [
     # Conversations & Messages
     "Conversation",
     "Message",
+    # Platform
+    "AuditLog",
+    "UsageRecord",
+    "FeatureFlag",
+    "Webhook",
+    "WebhookDelivery",
     # Session Management
     "DatabaseManager",
     "get_db_manager",

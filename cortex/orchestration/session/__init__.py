@@ -49,6 +49,13 @@ from cortex.orchestration.session.checkpointer import (
     is_checkpointing_enabled,
     open_checkpointer_pool,
 )
+from cortex.orchestration.session.orchestrator import (
+    AnalyticsHook,
+    SessionConfig,
+    SessionEventHook,
+    SessionOrchestrator,
+    SessionResult,
+)
 
 __all__ = [
     "open_checkpointer_pool",
@@ -58,4 +65,9 @@ __all__ = [
     "is_checkpointing_enabled",
     "has_existing_checkpoint",
     "build_thread_id",
+    "SessionOrchestrator",
+    "SessionConfig",
+    "SessionResult",
+    "SessionEventHook",
+    "AnalyticsHook",
 ]

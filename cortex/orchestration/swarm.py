@@ -253,7 +253,13 @@ class Swarm:
     # =========================================================================
 
     def _build_agents(self) -> list[CompiledStateGraph]:
-        """Build all agents with handoff tools injected."""
+        """Build all agents with handoff tools injected.
+
+        When a target agent has ``use_summarizing_handoff=True``, the
+        handoff tool description instructs the LLM to include a summary
+        of the conversation context in the handoff message, reducing
+        token usage for the receiving agent.
+        """
         agents = []
 
         for name, config in self._agent_configs.items():
@@ -266,6 +272,12 @@ class Swarm:
                     if target_config
                     else f"Transfer to {target}"
                 )
+                if target_config and target_config.use_summarizing_handoff:
+                    desc += (
+                        " When transferring, include a concise summary of the "
+                        "conversation so far so the receiving agent has context "
+                        "without needing the full history."
+                    )
                 handoff_tools.append(
                     create_handoff_tool(
                         agent_name=target,

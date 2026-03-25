@@ -95,6 +95,39 @@ class MessageRepository(BaseRepository[Message]):
         )
         return result.scalar_one_or_none()
 
+    async def search_content(
+        self,
+        conversation_id: int,
+        query: str,
+        limit: int = 50,
+    ) -> list[Message]:
+        """Search messages by content within a conversation."""
+        pattern = f"%{query}%"
+        result = await self.session.execute(
+            select(Message)
+            .where(
+                Message.conversation_id == conversation_id,
+                Message.content.ilike(pattern),
+            )
+            .order_by(Message.created_at.asc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def delete_after(
+        self, conversation_id: int, after_created_at
+    ) -> int:
+        """Delete all messages created after a given timestamp."""
+        from sqlalchemy import delete as sa_delete
+
+        result = await self.session.execute(
+            sa_delete(Message).where(
+                Message.conversation_id == conversation_id,
+                Message.created_at > after_created_at,
+            )
+        )
+        return result.rowcount
+
     async def find_by_role(
         self,
         conversation_id: int,

@@ -58,6 +58,11 @@ from .observability.monitor import SwarmMonitor
 # Optional: Session persistence (requires PostgreSQL)
 try:
     from .session import (
+        AnalyticsHook,
+        SessionConfig,
+        SessionEventHook,
+        SessionOrchestrator,
+        SessionResult,
         build_thread_id,
         close_checkpointer_pool,
         get_checkpointer,
@@ -70,6 +75,11 @@ try:
     _SESSION_AVAILABLE = True
 except ImportError:
     _SESSION_AVAILABLE = False
+    AnalyticsHook = None
+    SessionConfig = None
+    SessionEventHook = None
+    SessionOrchestrator = None
+    SessionResult = None
     build_thread_id = None
     close_checkpointer_pool = None
     get_checkpointer = None
@@ -113,6 +123,49 @@ from .validation import (
     validate_json_schema,
     validate_yaml_schema,
 )
+
+# Feature flags
+from .feature_flags import (
+    FeatureFlagEvaluator,
+    InMemoryFeatureFlags,
+    feature_flags,
+    set_feature_flag_evaluator,
+)
+
+# Intent detection
+from .intent import (
+    IntentDetector,
+    IntentResult,
+    KeywordIntentDetector,
+    LLMIntentDetector,
+)
+
+# Phased workflows
+from .workflow import (
+    PhasedWorkflow,
+    VerificationResult,
+    WorkflowPhase,
+    WorkflowState,
+)
+
+# Service client registry
+from .services import (
+    ServiceClient,
+    ServiceClientRegistry,
+    service_registry,
+)
+
+# Semantic layer
+from .semantic import (
+    GrammarDefinition,
+    InMemorySemanticLayer,
+    SchemaDefinition,
+    SemanticLayer,
+    ValidationResult,
+)
+
+# Metrics hooks
+from .middleware.metrics import SessionMetricsHook
 
 # Optional imports (may fail if dependencies not installed)
 try:
@@ -189,7 +242,7 @@ __all__ = [
     "get_tracer",
     "is_telemetry_enabled",
     "shutdown_telemetry",
-    # Session Persistence (optional)
+    # Session Persistence and Orchestration (optional)
     "open_checkpointer_pool",
     "close_checkpointer_pool",
     "get_checkpointer",
@@ -197,6 +250,11 @@ __all__ = [
     "is_checkpointing_enabled",
     "has_existing_checkpoint",
     "build_thread_id",
+    "SessionOrchestrator",
+    "SessionConfig",
+    "SessionResult",
+    "SessionEventHook",
+    "AnalyticsHook",
     # Validation
     "resolve_content_from_path",
     "validate_json_schema",
@@ -251,4 +309,31 @@ __all__ = [
     "MCPLoader",
     "MCPServerRegistry",
     "mcp_server_registry",
+    # Feature Flags (from ml-infra)
+    "FeatureFlagEvaluator",
+    "InMemoryFeatureFlags",
+    "feature_flags",
+    "set_feature_flag_evaluator",
+    # Intent Detection (from ml-infra)
+    "IntentDetector",
+    "IntentResult",
+    "KeywordIntentDetector",
+    "LLMIntentDetector",
+    # Phased Workflows (from ml-infra)
+    "PhasedWorkflow",
+    "WorkflowPhase",
+    "WorkflowState",
+    "VerificationResult",
+    # Service Client Registry (from ml-infra)
+    "ServiceClient",
+    "ServiceClientRegistry",
+    "service_registry",
+    # Semantic Layer (from ml-infra)
+    "SemanticLayer",
+    "SchemaDefinition",
+    "GrammarDefinition",
+    "ValidationResult",
+    "InMemorySemanticLayer",
+    # Metrics Hooks
+    "SessionMetricsHook",
 ]

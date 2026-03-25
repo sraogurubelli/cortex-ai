@@ -1,7 +1,7 @@
 """
 Chat API Routes
 
-AI chat endpoints with Agent orchestration and SSE streaming.
+AI chat endpoints with SessionOrchestrator and SSE streaming.
 """
 
 import asyncio
@@ -9,7 +9,7 @@ import json
 import logging
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -31,8 +31,12 @@ from cortex.platform.database.repositories import (
     ConversationRepository,
     MessageRepository,
 )
-from cortex.orchestration import Agent, ModelConfig, ToolRegistry
-from cortex.orchestration.session.checkpointer import get_checkpointer
+from cortex.orchestration import ToolRegistry
+from cortex.orchestration.session.orchestrator import (
+    SessionConfig,
+    SessionOrchestrator,
+    SessionResult,
+)
 from cortex.core.streaming.stream_writer import StreamWriter, create_streaming_response
 from cortex.prompts import get_prompt
 from cortex.orchestration.ui_actions.emitter import emit_show_document
@@ -47,6 +51,23 @@ router = APIRouter(prefix="/api/v1", tags=["chat"])
 # ============================================================================
 
 
+class AttachmentRef(BaseModel):
+    """File attachment reference."""
+    id: str = Field(..., description="Document/file UID")
+    name: str = Field(..., description="Original filename")
+    mime_type: str = Field(default="application/octet-stream")
+    content: Optional[str] = Field(
+        None, description="Extracted text content (populated server-side or by client)"
+    )
+
+
+class SystemEventPayload(BaseModel):
+    """Frontend → backend continuation payload."""
+    type: str = Field(..., description="action_completed | action_cancelled")
+    capability_id: Optional[str] = None
+    result: Optional[dict] = None
+
+
 class ChatRequest(BaseModel):
     """Chat request."""
 
@@ -55,6 +76,13 @@ class ChatRequest(BaseModel):
     stream: bool = Field(default=True, description="Enable SSE streaming")
     model: Optional[str] = Field(None, description="Model override (e.g., gpt-4o, claude-sonnet-4)")
     context: Optional[dict] = Field(default=None, description="Additional context")
+    attachments: Optional[list[AttachmentRef]] = Field(
+        default=None, description="File attachments for this message"
+    )
+    system_event: Optional[SystemEventPayload] = Field(
+        default=None,
+        description="UI action continuation (replaces message when set)",
+    )
 
 
 class MessageInfo(BaseModel):
@@ -65,6 +93,9 @@ class MessageInfo(BaseModel):
     content: str
     tool_calls: Optional[list[dict]] = None
     metadata: Optional[dict] = None
+    attachments: Optional[list[dict]] = None
+    rating: Optional[int] = None
+    rating_feedback: Optional[str] = None
     created_at: datetime
 
 
@@ -205,6 +236,10 @@ async def persist_messages(
             if "additional_kwargs" in msg:
                 metadata["additional_kwargs"] = msg["additional_kwargs"]
 
+            attachments_json = None
+            if "attachments" in msg and msg["attachments"]:
+                attachments_json = json.dumps(msg["attachments"])
+
             message_models.append(
                 Message(
                     uid=f"msg_{uuid.uuid4().hex[:12]}",
@@ -214,6 +249,7 @@ async def persist_messages(
                     tool_calls=tool_calls_json,
                     tool_call_id=tool_call_id,
                     meta_json=json.dumps(metadata) if metadata else None,
+                    attachments_json=attachments_json,
                 )
             )
 
@@ -235,7 +271,21 @@ async def persist_messages(
 
     except Exception as e:
         logger.exception("Failed to persist messages", error=str(e))
-        # Don't fail the request if persistence fails
+
+
+def _to_message_info(msg: Message) -> MessageInfo:
+    """Convert a DB Message to a MessageInfo response model."""
+    return MessageInfo(
+        id=msg.uid,
+        role=msg.role,
+        content=msg.content,
+        tool_calls=json.loads(msg.tool_calls) if msg.tool_calls else None,
+        metadata=json.loads(msg.meta_json) if msg.meta_json else None,
+        attachments=json.loads(msg.attachments_json) if msg.attachments_json else None,
+        rating=msg.rating,
+        rating_feedback=msg.rating_feedback,
+        created_at=msg.created_at,
+    )
 
 
 # ============================================================================
@@ -255,6 +305,9 @@ async def chat_stream(
     """
     Chat with streaming (SSE).
 
+    Uses SessionOrchestrator for the full lifecycle: checkpointer health,
+    message dedup, streaming, guaranteed done+close, and Langfuse spans.
+
     Requires CONVERSATION_CREATE permission on the project.
     """
     # Load project with organization and account
@@ -266,11 +319,9 @@ async def chat_stream(
             detail="Project not found",
         )
 
-    # Load organization
     org_repo = OrganizationRepository(session)
     organization = await org_repo.find_by_id(project.organization_id)
 
-    # Load account
     account_repo = AccountRepository(session)
     account = await account_repo.find_by_id(organization.account_id)
 
@@ -279,7 +330,7 @@ async def chat_stream(
         session, project, principal, request.conversation_id
     )
 
-    # Build agent with context injection
+    # Build tool registry with project context
     tool_registry = ToolRegistry()
     tool_registry.set_context(
         user_id=principal.uid,
@@ -287,41 +338,18 @@ async def chat_stream(
         project_id=project.uid,
         organization_id=organization.uid,
         account_id=account.uid,
-        tenant_id=account.uid,  # For multi-tenancy
+        tenant_id=account.uid,
     )
     tool_registry.register(create_document_search_tool())
 
-    agent = Agent(
-        name="assistant",
-        system_prompt=get_prompt(
-            "chat.system",
-            agent_name="assistant",
-            has_documents=True,
-        ),
-        model=ModelConfig(
-            model=request.model or "gpt-4o",
-            use_gateway=False,
-        ),
-        tool_registry=tool_registry,
-        checkpointer=get_checkpointer(),
-        max_iterations=25,
-    )
-
-    # Create SSE writer
     stream_writer = StreamWriter()
 
-    # Stream agent response in background
-    async def stream_agent():
-        try:
-            result = await agent.stream_to_writer(
-                message=request.message,
-                stream_writer=stream_writer,
-                thread_id=conversation.thread_id,
-                enable_part_streaming=True,
-            )
-
-            # Emit UI actions when the response references known entities
-            if result.response and request.context:
+    # Event hook for domain-specific UI actions (fires before done)
+    class _UIActionHook:
+        async def on_session_complete(
+            self, config: SessionConfig, result: SessionResult, metadata: dict
+        ) -> None:
+            if result.final_response and request.context:
                 doc_id = request.context.get("referenced_document_id")
                 if doc_id:
                     await emit_show_document(
@@ -330,31 +358,105 @@ async def chat_stream(
                         project_id=project.uid,
                     )
 
-            # Send done event
-            await stream_writer.write_event(
-                "done",
-                {
-                    "conversation_id": conversation.uid,
-                    "thread_id": conversation.thread_id,
-                    "token_usage": result.token_usage,
-                },
-            )
+        async def on_session_start(self, config: Any, metadata: dict) -> None:
+            pass
 
-            # Persist messages to database (background)
+        async def on_session_error(
+            self, config: Any, error: Exception, metadata: dict
+        ) -> None:
+            pass
+
+    orchestrator = SessionOrchestrator(tool_registry=tool_registry)
+
+    attachment_dicts = (
+        [a.model_dump() for a in request.attachments]
+        if request.attachments
+        else []
+    )
+
+    session_config = SessionConfig(
+        message=request.message,
+        model=request.model or "gpt-4o",
+        system_prompt=get_prompt(
+            "chat.system",
+            agent_name="assistant",
+            has_documents=True,
+        ),
+        tenant_id=account.uid,
+        project_id=project.uid,
+        principal_id=str(principal.id),
+        conversation_id=conversation.uid,
+        agent_name="assistant",
+        stream_writer=stream_writer,
+        streaming=True,
+        enable_part_streaming=True,
+        thread_id=conversation.thread_id,
+        event_hooks=[_UIActionHook()],
+        attachments=attachment_dicts,
+        system_event=request.system_event.model_dump() if request.system_event else None,
+    )
+
+    async def run_orchestrator():
+        try:
+            result = await orchestrator.run_session(session_config)
+
             message_repo = MessageRepository(session)
             await persist_messages(session, conversation, result.messages, message_repo)
 
-        except Exception as e:
-            logger.exception("Chat stream error", error=str(e))
-            await stream_writer.write_event("error", {"error": str(e)})
+            if conversation.title == "New conversation" and result.final_response:
+                _schedule_title_generation(conversation.uid)
         finally:
-            await stream_writer.close()
+            from cortex.api.routes.chat_extensions import unregister_active_task
+            unregister_active_task(conversation.uid)
 
-    # Start streaming in background
-    asyncio.create_task(stream_agent())
+    task = asyncio.create_task(run_orchestrator())
 
-    # Return SSE response
+    from cortex.api.routes.chat_extensions import register_active_task
+    register_active_task(conversation.uid, task)
+
     return await create_streaming_response(stream_writer)
+
+
+def _schedule_title_generation(conversation_uid: str) -> None:
+    """Fire-and-forget LLM title generation after first exchange."""
+    async def _generate():
+        try:
+            from cortex.platform.database.session import get_db_manager
+            async with get_db_manager().session() as db:
+                conv_repo = ConversationRepository(db)
+                conv = await conv_repo.find_by_uid(conversation_uid)
+                if not conv or conv.title != "New conversation":
+                    return
+                msg_repo = MessageRepository(db)
+                messages = await msg_repo.find_by_conversation(conv.id, limit=6)
+                if not messages:
+                    return
+                transcript = "\n".join(
+                    f"{m.role}: {m.content[:200]}" for m in messages if m.content
+                )
+                from cortex.orchestration.llm import LLMClient
+                from cortex.orchestration.config import ModelConfig
+
+                client = LLMClient(ModelConfig(model="gpt-4o-mini", temperature=0.3))
+                model = client.get_model()
+                from langchain_core.messages import HumanMessage as HM
+
+                result = await model.ainvoke([
+                    HM(content=(
+                        "Generate a concise title (max 60 chars) for this conversation. "
+                        "Return ONLY the title.\n\n" + transcript
+                    ))
+                ])
+                title = result.content.strip().strip('"\'')[:100]
+                await conv_repo.update_title(conv.id, title)
+                await db.commit()
+        except Exception:
+            logger.debug("Background title generation failed", exc_info=True)
+
+    try:
+        asyncio.create_task(_generate())
+    except RuntimeError:
+        pass
 
 
 @router.post("/projects/{project_uid}/chat", response_model=ChatResponse)
@@ -369,9 +471,11 @@ async def chat(
     """
     Chat without streaming.
 
+    Uses SessionOrchestrator for checkpointer health, message dedup,
+    and Langfuse spans — but without SSE streaming.
+
     Requires CONVERSATION_CREATE permission on the project.
     """
-    # Load project with organization and account
     project_repo = ProjectRepository(session)
     project = await project_repo.find_by_uid(project_uid)
     if not project:
@@ -380,20 +484,16 @@ async def chat(
             detail="Project not found",
         )
 
-    # Load organization
     org_repo = OrganizationRepository(session)
     organization = await org_repo.find_by_id(project.organization_id)
 
-    # Load account
     account_repo = AccountRepository(session)
     account = await account_repo.find_by_id(organization.account_id)
 
-    # Get or create conversation
     conversation = await get_or_create_conversation(
         session, project, principal, request.conversation_id
     )
 
-    # Build agent with context injection
     tool_registry = ToolRegistry()
     tool_registry.set_context(
         user_id=principal.uid,
@@ -405,51 +505,44 @@ async def chat(
     )
     tool_registry.register(create_document_search_tool())
 
-    agent = Agent(
-        name="assistant",
+    orchestrator = SessionOrchestrator(tool_registry=tool_registry)
+
+    session_config = SessionConfig(
+        message=request.message,
+        model=request.model or "gpt-4o",
         system_prompt=get_prompt(
             "chat.system",
             agent_name="assistant",
             has_documents=True,
         ),
-        model=ModelConfig(
-            model=request.model or "gpt-4o",
-            use_gateway=False,
-        ),
-        tool_registry=tool_registry,
-        checkpointer=get_checkpointer(),
-        max_iterations=25,
-    )
-
-    # Run agent (non-streaming)
-    result = await agent.run(
-        message=request.message,
+        tenant_id=account.uid,
+        project_id=project.uid,
+        principal_id=str(principal.id),
+        conversation_id=conversation.uid,
+        agent_name="assistant",
+        streaming=False,
         thread_id=conversation.thread_id,
     )
 
-    # Persist messages
+    result = await orchestrator.run_session(session_config)
+
+    if result.error:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=result.error,
+        )
+
     message_repo = MessageRepository(session)
     await persist_messages(session, conversation, result.messages, message_repo)
 
-    # Get all messages for response
     messages = await message_repo.find_by_conversation(conversation.id)
 
     return ChatResponse(
         conversation_id=conversation.uid,
-        thread_id=conversation.thread_id,
-        response=result.response,
-        token_usage=result.token_usage,
-        messages=[
-            MessageInfo(
-                id=msg.uid,
-                role=msg.role,
-                content=msg.content,
-                tool_calls=json.loads(msg.tool_calls) if msg.tool_calls else None,
-                metadata=json.loads(msg.meta_json) if msg.meta_json else None,
-                created_at=msg.created_at,
-            )
-            for msg in messages
-        ],
+        thread_id=result.thread_id,
+        response=result.final_response,
+        token_usage=result.usage,
+        messages=[_to_message_info(msg) for msg in messages],
     )
 
 
@@ -568,17 +661,7 @@ async def get_conversation(
         project_id=project.uid,
         title=conversation.title,
         thread_id=conversation.thread_id,
-        messages=[
-            MessageInfo(
-                id=msg.uid,
-                role=msg.role,
-                content=msg.content,
-                tool_calls=json.loads(msg.tool_calls) if msg.tool_calls else None,
-                metadata=json.loads(msg.meta_json) if msg.meta_json else None,
-                created_at=msg.created_at,
-            )
-            for msg in messages
-        ],
+        messages=[_to_message_info(msg) for msg in messages],
         created_at=conversation.created_at,
         updated_at=conversation.updated_at,
     )
