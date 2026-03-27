@@ -1,0 +1,166 @@
+{
+  "version": "1.0",
+  "description": "Skill activation triggers for cortex-ai. Controls when skills automatically suggest actions.",
+  "skills": {
+    "orchestration-dev": {
+      "type": "domain",
+      "enforcement": "suggest",
+      "priority": "high",
+      "description": "Agent development patterns for cortex-ai orchestration",
+      "promptTriggers": {
+        "keywords": [
+          "agent",
+          "agents",
+          "orchestration",
+          "tool",
+          "tools",
+          "create agent",
+          "new agent",
+          "agent execution",
+          "async/await",
+          "thread_id",
+          "context injection",
+          "ToolRegistry",
+          "ModelConfig",
+          "swarm",
+          "multi-agent",
+          "agent pattern",
+          "LangGraph",
+          "LangChain"
+        ],
+        "intentPatterns": [
+          "(create|add|build|implement).*?(agent|tool|orchestration)",
+          "(fix|debug|handle).*?(agent|async|await|thread)",
+          "(how to|best practice).*?(agent|orchestration|tool)",
+          "(use|add|register).*?(tool|context|registry)",
+          "agent.*?(run|execute|stream|error)"
+        ]
+      },
+      "fileTriggers": {
+        "pathPatterns": [
+          "cortex/orchestration/**/*.py",
+          "tests/orchestration/**/*.py",
+          "examples/*orchestration*.py",
+          "cortex/tools/**/*.py"
+        ],
+        "contentPatterns": [
+          "class Agent",
+          "Agent\\(",
+          "ModelConfig\\(",
+          "ToolRegistry\\(",
+          "await agent\\.run",
+          "@tool",
+          "tool_registry",
+          "thread_id"
+        ]
+      }
+    },
+    "rag-query": {
+      "type": "domain",
+      "enforcement": "suggest",
+      "priority": "high",
+      "description": "RAG query optimization and debugging for cortex-ai",
+      "promptTriggers": {
+        "keywords": [
+          "RAG",
+          "retrieval",
+          "vector search",
+          "semantic search",
+          "embeddings",
+          "vector store",
+          "Qdrant",
+          "document search",
+          "knowledge base",
+          "GraphRAG",
+          "knowledge graph",
+          "Neo4j",
+          "retriever",
+          "chunks",
+          "chunking",
+          "similarity search",
+          "hybrid search"
+        ],
+        "intentPatterns": [
+          "(create|add|build|implement).*?(RAG|retrieval|search|vector)",
+          "(optimize|improve|debug).*?(RAG|search|retrieval|embedding)",
+          "(how to|best practice).*?(RAG|vector|search|retrieval)",
+          "(chunk|embed|index).*?(document|text|data)",
+          "search.*?(document|knowledge|vector)"
+        ]
+      },
+      "fileTriggers": {
+        "pathPatterns": [
+          "cortex/rag/**/*.py",
+          "tests/rag/**/*.py",
+          "examples/*rag*.py",
+          "cortex/rag/graph_rag/**/*.py"
+        ],
+        "contentPatterns": [
+          "class.*?(Retriever|VectorStore|EmbeddingService)",
+          "vector_store",
+          "embeddings",
+          "similarity_search",
+          "graph_rag",
+          "Neo4j",
+          "qdrant"
+        ]
+      }
+    },
+    "api-endpoint": {
+      "type": "domain",
+      "enforcement": "suggest",
+      "priority": "high",
+      "description": "FastAPI endpoint creation patterns for cortex-ai",
+      "promptTriggers": {
+        "keywords": [
+          "API",
+          "endpoint",
+          "route",
+          "FastAPI",
+          "HTTP",
+          "REST",
+          "POST",
+          "GET",
+          "PUT",
+          "DELETE",
+          "request",
+          "response",
+          "SSE",
+          "streaming",
+          "middleware",
+          "authentication",
+          "validation",
+          "Pydantic",
+          "schema",
+          "CORS",
+          "rate limit"
+        ],
+        "intentPatterns": [
+          "(create|add|build|implement).*?(API|endpoint|route)",
+          "(fix|debug|handle).*?(API|endpoint|request|response)",
+          "(how to|best practice).*?(API|endpoint|FastAPI|route)",
+          "(validate|authenticate|authorize).*?(request|endpoint|API)",
+          "(stream|SSE).*?(response|endpoint)"
+        ]
+      },
+      "fileTriggers": {
+        "pathPatterns": [
+          "cortex/api/**/*.py",
+          "tests/api/**/*.py",
+          "cortex/api/routes/**/*.py",
+          "cortex/api/middleware/**/*.py"
+        ],
+        "contentPatterns": [
+          "@router\\.(get|post|put|delete|patch)",
+          "APIRouter\\(",
+          "HTTPException",
+          "Depends\\(",
+          "BaseModel",
+          "Field\\(",
+          "StreamingResponse",
+          "EventSourceResponse"
+        ]
+      }
+    }
+  }
+}

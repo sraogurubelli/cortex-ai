@@ -1,0 +1,6 @@
+#!/bin/bash
+# Quick skill check wrapper
+# Usage: ./check-skill "your prompt here"
+
+cd "$(dirname "$0")/.claude/hooks"
+./manual-skill-check.sh "$@"

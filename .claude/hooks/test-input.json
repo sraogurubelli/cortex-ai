@@ -1,0 +1,7 @@
+{
+  "session_id": "test-123",
+  "transcript_path": "/Users/sgurubelli/.claude/transcripts/test.jsonl",
+  "cwd": "/Users/sgurubelli/aiplatform/cortex-ai",
+  "permission_mode": "auto",
+  "prompt": "I want to create a new agent for data analysis"
+}

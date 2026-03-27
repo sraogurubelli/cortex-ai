@@ -85,3 +85,4 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+/.claude/hooks/node_modules
