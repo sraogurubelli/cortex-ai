@@ -1,0 +1,147 @@
+---
+# Ingress for Cortex-AI API
+#
+# Exposes API via HTTPS with SSL termination
+#
+# Prerequisites:
+#   - Ingress controller (e.g., nginx-ingress, traefik)
+#   - cert-manager for automatic SSL certificates
+#
+# Usage:
+#   kubectl apply -f api-ingress.yaml
+#   kubectl get ingress cortex-api
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cortex-api
+  namespace: cortex
+  annotations:
+    # Ingress class
+    kubernetes.io/ingress.class: "nginx"
+
+    # SSL/TLS
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    cert-manager.io/acme-challenge-type: "http01"
+
+    # Session affinity (for WebSocket)
+    nginx.ingress.kubernetes.io/affinity: "cookie"
+    nginx.ingress.kubernetes.io/affinity-mode: "persistent"
+    nginx.ingress.kubernetes.io/session-cookie-name: "cortex-session"
+    nginx.ingress.kubernetes.io/session-cookie-max-age: "3600"
+    nginx.ingress.kubernetes.io/session-cookie-samesite: "Lax"
+
+    # WebSocket support
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+
+    # Proxy buffer settings
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+
+    # CORS (if not handled by application)
+    # nginx.ingress.kubernetes.io/enable-cors: "true"
+    # nginx.ingress.kubernetes.io/cors-allow-origin: "https://app.cortex.ai"
+    # nginx.ingress.kubernetes.io/cors-allow-credentials: "true"
+
+    # Rate limiting
+    nginx.ingress.kubernetes.io/limit-rps: "100"
+    nginx.ingress.kubernetes.io/limit-connections: "50"
+
+    # Client upload size
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+
+    # Security headers
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      more_set_headers "X-Frame-Options: DENY";
+      more_set_headers "X-Content-Type-Options: nosniff";
+      more_set_headers "X-XSS-Protection: 1; mode=block";
+      more_set_headers "Referrer-Policy: strict-origin-when-cross-origin";
+
+spec:
+  tls:
+    - hosts:
+        - api.cortex.ai
+      secretName: cortex-api-tls
+
+  rules:
+    - host: api.cortex.ai
+      http:
+        paths:
+          # WebSocket endpoints (with special configuration)
+          - path: /api/v1/ws
+            pathType: Prefix
+            backend:
+              service:
+                name: cortex-api
+                port:
+                  name: http
+
+          # SSE streaming endpoints
+          - path: /api/v1/chat/stream
+            pathType: Prefix
+            backend:
+              service:
+                name: cortex-api
+                port:
+                  name: http
+
+          # Regular API endpoints
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: cortex-api
+                port:
+                  name: http
+
+          # Health checks
+          - path: /health
+            pathType: Prefix
+            backend:
+              service:
+                name: cortex-api
+                port:
+                  name: http
+
+          # Metrics (restrict in production)
+          - path: /metrics
+            pathType: Prefix
+            backend:
+              service:
+                name: cortex-api
+                port:
+                  name: http
+
+---
+# Alternative: Traefik Ingress Route (if using Traefik)
+# apiVersion: traefik.containo.us/v1alpha1
+# kind: IngressRoute
+# metadata:
+#   name: cortex-api
+#   namespace: cortex
+# spec:
+#   entryPoints:
+#     - websecure
+#   routes:
+#     # WebSocket routes
+#     - match: Host(`api.cortex.ai`) && PathPrefix(`/api/v1/ws`)
+#       kind: Rule
+#       services:
+#         - name: cortex-api
+#           port: 8000
+#           sticky:
+#             cookie:
+#               name: cortex-session
+#               httpOnly: true
+#               secure: true
+#
+#     # Regular API routes
+#     - match: Host(`api.cortex.ai`) && PathPrefix(`/api`)
+#       kind: Rule
+#       services:
+#         - name: cortex-api
+#           port: 8000
+#
+#   tls:
+#     certResolver: letsencrypt

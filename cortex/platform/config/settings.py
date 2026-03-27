@@ -118,15 +118,21 @@ class PlatformSettings(BaseSettings):
         default=5, description="Redis socket connect timeout in seconds", gt=0
     )
 
-    # Cache TTLs
+    # Cache TTLs (Phase 1: Redis Cache Expansion)
     cache_ttl_embeddings: int = Field(
         default=3600, description="Embeddings cache TTL in seconds", gt=0
     )
     cache_ttl_search: int = Field(
-        default=300, description="Search cache TTL in seconds", gt=0
+        default=300, description="Search results cache TTL in seconds (5 min)", gt=0
     )
-    cache_ttl_session: int = Field(
-        default=86400, description="Session cache TTL in seconds", gt=0
+    cache_ttl_session_metadata: int = Field(
+        default=3600, description="Session metadata cache TTL in seconds (1 hour)", gt=0
+    )
+    cache_ttl_history: int = Field(
+        default=3600, description="Conversation history cache TTL in seconds (1 hour)", gt=0
+    )
+    cache_max_history_messages: int = Field(
+        default=100, description="Maximum messages to cache per conversation", gt=0
     )
 
     # =========================================================================
@@ -137,6 +143,57 @@ class PlatformSettings(BaseSettings):
     )
     sse_connection_timeout_hours: int = Field(
         default=2, description="SSE connection timeout in hours", gt=0
+    )
+
+    # =========================================================================
+    # Kafka (Phase 2A: Event Streaming)
+    # =========================================================================
+    kafka_enabled: bool = Field(
+        default=False, description="Enable Kafka event streaming"
+    )
+    kafka_bootstrap_servers: str = Field(
+        default="localhost:9092", description="Kafka broker addresses (comma-separated)"
+    )
+    kafka_enable_fallback: bool = Field(
+        default=True, description="Fallback to logging if Kafka unavailable"
+    )
+    kafka_consumer_group_prefix: str = Field(
+        default="cortex", description="Consumer group ID prefix"
+    )
+
+    # =========================================================================
+    # WebSocket (Phase 2B: Real-time Communication)
+    # =========================================================================
+    websocket_enabled: bool = Field(
+        default=True, description="Enable WebSocket endpoints"
+    )
+    websocket_ping_interval: int = Field(
+        default=30, description="WebSocket ping interval in seconds", gt=0
+    )
+    websocket_max_message_size: int = Field(
+        default=1048576, description="Max WebSocket message size in bytes (1MB)", gt=0
+    )
+
+    # =========================================================================
+    # StarRocks (Phase 3: OLAP Analytics)
+    # =========================================================================
+    starrocks_enabled: bool = Field(
+        default=False, description="Enable StarRocks OLAP analytics"
+    )
+    starrocks_host: str = Field(
+        default="localhost", description="StarRocks FE host"
+    )
+    starrocks_port: int = Field(
+        default=9030, description="StarRocks query port (MySQL protocol)", gt=0
+    )
+    starrocks_user: str = Field(
+        default="root", description="StarRocks user"
+    )
+    starrocks_password: str = Field(
+        default="", description="StarRocks password"
+    )
+    starrocks_database: str = Field(
+        default="cortex_analytics", description="StarRocks database name"
     )
 
     # =========================================================================

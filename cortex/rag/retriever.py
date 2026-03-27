@@ -62,10 +62,12 @@ Usage:
 
 import logging
 from dataclasses import dataclass
-from typing import Any, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING, Optional
 
 from cortex.rag.embeddings import EmbeddingService
 from cortex.rag.vector_store import VectorStore
+from cortex.rag.cache import SearchCache
+from cortex.platform.config.settings import get_settings
 
 if TYPE_CHECKING:
     from cortex.rag.graph.graph_store import GraphStore
@@ -107,6 +109,7 @@ class Retriever:
         embeddings: EmbeddingService,
         vector_store: VectorStore,
         graph_store: "GraphStore | None" = None,
+        enable_cache: bool = True,
     ):
         """
         Initialize retriever.
@@ -115,6 +118,7 @@ class Retriever:
             embeddings: Embedding service
             vector_store: Vector store
             graph_store: Optional graph store for GraphRAG
+            enable_cache: Enable search result caching (Phase 1)
 
         Example:
             >>> retriever = Retriever(
@@ -134,6 +138,16 @@ class Retriever:
         self.embeddings = embeddings
         self.vector_store = vector_store
         self.graph_store = graph_store
+
+        # Phase 1: Initialize search cache
+        self.cache: Optional[SearchCache] = None
+        if enable_cache:
+            settings = get_settings()
+            self.cache = SearchCache(
+                redis_url=settings.redis_url,
+                ttl=settings.cache_ttl_search,
+            )
+            logger.info("Retriever initialized with search cache (80% hit rate expected)")
 
         if graph_store:
             logger.info("Retriever initialized with GraphRAG support")
@@ -174,6 +188,35 @@ class Retriever:
         if not query.strip():
             raise ValueError("Query cannot be empty")
 
+        # Phase 1: Try cache first (80% hit rate for repeated searches)
+        if self.cache:
+            await self.cache.connect()
+            cached_results_data = await self.cache.get_results(
+                query=query,
+                top_k=top_k,
+                filter_dict=filter,
+                tenant_id=tenant_id,
+            )
+
+            if cached_results_data is not None:
+                # Cache hit - reconstruct SearchResult objects
+                results = [
+                    SearchResult(
+                        id=r["id"],
+                        content=r["content"],
+                        score=r["score"],
+                        metadata=r["metadata"],
+                    )
+                    for r in cached_results_data
+                ]
+                logger.info(
+                    f"Search cache HIT for '{query[:50]}...' - {len(results)} results"
+                )
+                return results
+
+        # Cache miss or cache disabled - perform vector search
+        logger.debug(f"Search cache MISS for '{query[:50]}...' - querying vector store")
+
         # Generate query embedding
         query_embedding = await self.embeddings.generate_embedding(query)
 
@@ -206,6 +249,26 @@ class Retriever:
         ]
 
         logger.info(f"Search for '{query[:50]}...' returned {len(results)} results")
+
+        # Phase 1: Cache results for next time
+        if self.cache and results:
+            # Serialize SearchResult objects for caching
+            results_data = [
+                {
+                    "id": r.id,
+                    "content": r.content,
+                    "score": r.score,
+                    "metadata": r.metadata,
+                }
+                for r in results
+            ]
+            await self.cache.set_results(
+                query=query,
+                results=results_data,
+                top_k=top_k,
+                filter_dict=filter,
+                tenant_id=tenant_id,
+            )
         return results
 
     async def hybrid_search(

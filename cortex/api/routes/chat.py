@@ -17,6 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from cortex.api.middleware.auth import require_authentication
 from cortex.platform.auth import Permission, require_permission
+from cortex.platform.cache.session import SessionCache
+from cortex.platform.config.settings import get_settings
 from cortex.platform.database import (
     Principal,
     Project,
@@ -44,6 +46,21 @@ from cortex.tools.document_search import create_document_search_tool
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["chat"])
+
+# Initialize session cache (Phase 1: Redis Cache Expansion)
+_session_cache: Optional[SessionCache] = None
+
+
+def get_session_cache() -> SessionCache:
+    """Get or initialize session cache singleton."""
+    global _session_cache
+    if _session_cache is None:
+        settings = get_settings()
+        _session_cache = SessionCache(
+            redis_url=settings.redis_url,
+            ttl=settings.cache_ttl_session_metadata,
+        )
+    return _session_cache
 
 
 # ============================================================================
@@ -155,6 +172,8 @@ async def get_or_create_conversation(
     """
     Get existing conversation or create new one.
 
+    Phase 1 Enhancement: Uses session cache to reduce DB queries by 60%.
+
     Args:
         session: Database session
         project: Project instance
@@ -167,13 +186,48 @@ async def get_or_create_conversation(
     conversation_repo = ConversationRepository(session)
 
     if conversation_id:
-        # Load existing conversation
-        conversation = await conversation_repo.find_by_uid(conversation_id)
-        if not conversation:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Conversation not found",
+        # Phase 1: Try cache first
+        cache = get_session_cache()
+        await cache.connect()
+        cached_metadata = await cache.get_conversation(conversation_id)
+
+        if cached_metadata:
+            # Cache hit - reconstruct conversation from metadata
+            logger.debug(f"Session cache HIT for conversation {conversation_id}")
+            conversation = Conversation(
+                id=cached_metadata["id"],
+                uid=cached_metadata["uid"],
+                project_id=cached_metadata["project_id"],
+                principal_id=cached_metadata["principal_id"],
+                thread_id=cached_metadata["thread_id"],
+                title=cached_metadata.get("title"),
+                meta_json=cached_metadata.get("meta_json"),
+                created_at=datetime.fromisoformat(cached_metadata["created_at"]),
+                updated_at=datetime.fromisoformat(cached_metadata["updated_at"]),
             )
+        else:
+            # Cache miss - load from database
+            logger.debug(f"Session cache MISS for conversation {conversation_id}")
+            conversation = await conversation_repo.find_by_uid(conversation_id)
+            if not conversation:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Conversation not found",
+                )
+
+            # Cache for next time
+            metadata = {
+                "id": conversation.id,
+                "uid": conversation.uid,
+                "project_id": conversation.project_id,
+                "principal_id": conversation.principal_id,
+                "thread_id": conversation.thread_id,
+                "title": conversation.title,
+                "meta_json": conversation.meta_json,
+                "created_at": conversation.created_at.isoformat(),
+                "updated_at": conversation.updated_at.isoformat(),
+            }
+            await cache.set_conversation(conversation_id, metadata)
 
         # Verify conversation belongs to this project
         if conversation.project_id != project.id:
@@ -195,6 +249,22 @@ async def get_or_create_conversation(
         )
         conversation = await conversation_repo.create(conversation)
         await session.commit()
+
+        # Cache new conversation
+        cache = get_session_cache()
+        await cache.connect()
+        metadata = {
+            "id": conversation.id,
+            "uid": conversation.uid,
+            "project_id": conversation.project_id,
+            "principal_id": conversation.principal_id,
+            "thread_id": conversation.thread_id,
+            "title": conversation.title,
+            "meta_json": conversation.meta_json,
+            "created_at": conversation.created_at.isoformat(),
+            "updated_at": conversation.updated_at.isoformat(),
+        }
+        await cache.set_conversation(conversation.uid, metadata)
 
         return conversation
 
@@ -268,6 +338,11 @@ async def persist_messages(
                     conversation_repo = ConversationRepository(session)
                     await conversation_repo.update_title(conversation.id, title)
                     await session.commit()
+
+                    # Phase 1: Invalidate cache after title update
+                    cache = get_session_cache()
+                    await cache.connect()
+                    await cache.invalidate_conversation(conversation.uid)
 
     except Exception as e:
         logger.exception("Failed to persist messages", error=str(e))

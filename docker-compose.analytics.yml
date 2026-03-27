@@ -1,0 +1,154 @@
+###############################################################################
+# Cortex-AI Analytics Stack (Phase 3)
+#
+# StarRocks OLAP + Debezium CDC for real-time analytics
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.analytics.yml --profile analytics up -d
+#   docker compose -f docker-compose.yml -f docker-compose.analytics.yml down -v
+###############################################################################
+
+services:
+  # ---------------------------------------------------------------------------
+  # StarRocks FE (Frontend) — SQL interface and metadata management
+  # ---------------------------------------------------------------------------
+  starrocks-fe:
+    image: starrocks/fe-ubuntu:3.2-latest
+    restart: unless-stopped
+    profiles:
+      - analytics
+    hostname: starrocks-fe
+    container_name: starrocks-fe
+    environment:
+      - TZ=UTC
+    ports:
+      - "8030:8030"  # HTTP UI
+      - "9020:9020"  # RPC
+      - "9030:9030"  # MySQL protocol (query port)
+    volumes:
+      - starrocks-fe-meta:/opt/starrocks/fe/meta
+      - starrocks-fe-log:/opt/starrocks/fe/log
+    healthcheck:
+      test: ["CMD-SHELL", "mysql -h 127.0.0.1 -P 9030 -u root -e 'SELECT 1' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # StarRocks BE (Backend) — Data storage and computation
+  # ---------------------------------------------------------------------------
+  starrocks-be:
+    image: starrocks/be-ubuntu:3.2-latest
+    restart: unless-stopped
+    profiles:
+      - analytics
+    hostname: starrocks-be
+    container_name: starrocks-be
+    depends_on:
+      starrocks-fe:
+        condition: service_healthy
+    environment:
+      - TZ=UTC
+    command:
+      - /bin/bash
+      - -c
+      - |
+        echo "FE_SERVERS = starrocks-fe:9010" >> /opt/starrocks/be/conf/be.conf
+        /opt/starrocks/be/bin/start_be.sh
+    ports:
+      - "8040:8040"  # HTTP port
+      - "9060:9060"  # Heartbeat port
+      - "8060:8060"  # Broker RPC port
+    volumes:
+      - starrocks-be-storage:/opt/starrocks/be/storage
+      - starrocks-be-log:/opt/starrocks/be/log
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8040/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Debezium Connect — CDC from PostgreSQL to Kafka
+  # ---------------------------------------------------------------------------
+  debezium-connect:
+    image: debezium/connect:2.6
+    restart: unless-stopped
+    profiles:
+      - analytics
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: debezium-cortex
+      CONFIG_STORAGE_TOPIC: debezium_configs
+      OFFSET_STORAGE_TOPIC: debezium_offsets
+      STATUS_STORAGE_TOPIC: debezium_statuses
+      # Increase timeouts for initial snapshot
+      CONNECT_TASK_SHUTDOWN_GRACEFUL_TIMEOUT_MS: "30000"
+      CONNECT_OFFSET_FLUSH_INTERVAL_MS: "60000"
+    ports:
+      - "8083:8083"  # REST API
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8083/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Debezium UI — Web UI for managing connectors (optional)
+  # ---------------------------------------------------------------------------
+  debezium-ui:
+    image: debezium/debezium-ui:2.6
+    restart: unless-stopped
+    profiles:
+      - analytics
+    depends_on:
+      debezium-connect:
+        condition: service_healthy
+    environment:
+      KAFKA_CONNECT_URIS: http://debezium-connect:8083
+    ports:
+      - "8082:8080"  # Web UI
+
+  # ---------------------------------------------------------------------------
+  # StarRocks Routine Load Manager (helper for Kafka ingestion)
+  # ---------------------------------------------------------------------------
+  starrocks-loader:
+    image: alpine:latest
+    restart: "no"
+    profiles:
+      - analytics
+    depends_on:
+      starrocks-fe:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./cortex/platform/analytics:/analytics
+    command:
+      - /bin/sh
+      - -c
+      - |
+        echo "StarRocks Loader: Schema and routine load setup"
+        echo "Install mysql client..."
+        apk add --no-cache mysql-client
+
+        echo "Waiting for StarRocks to be ready..."
+        sleep 10
+
+        echo "Creating analytics database and tables..."
+        mysql -h starrocks-fe -P 9030 -u root < /analytics/schema.sql
+
+        echo "Setup complete! You can now configure Debezium and StarRocks Routine Load."
+        echo "Access StarRocks UI: http://localhost:8030"
+        echo "Access Debezium UI: http://localhost:8082"
+
+volumes:
+  starrocks-fe-meta:
+  starrocks-fe-log:
+  starrocks-be-storage:
+  starrocks-be-log:

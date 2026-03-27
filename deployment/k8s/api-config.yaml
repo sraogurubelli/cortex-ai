@@ -1,0 +1,121 @@
+---
+# ConfigMap for Cortex-AI API (non-sensitive configuration)
+#
+# Usage:
+#   kubectl apply -f api-config.yaml
+#   kubectl get configmap cortex-config
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cortex-config
+  namespace: cortex
+data:
+  # Application
+  APP_NAME: "cortex-ai"
+  APP_ENV: "production"
+  DEBUG: "false"
+  LOG_LEVEL: "INFO"
+  LOG_FORMAT: "json"
+
+  # API Server
+  API_HOST: "0.0.0.0"
+  API_PORT: "8000"
+  API_WORKERS: "4"
+
+  # Database (connection string in secrets)
+  DATABASE_POOL_SIZE: "20"
+  DATABASE_MAX_OVERFLOW: "10"
+  DATABASE_ECHO: "false"
+
+  # Redis
+  REDIS_URL: "redis://cortex-redis:6379/0"
+  REDIS_MAX_CONNECTIONS: "50"
+  REDIS_SOCKET_TIMEOUT: "5"
+  REDIS_SOCKET_CONNECT_TIMEOUT: "5"
+
+  # Cache TTLs (Phase 1)
+  CACHE_TTL_EMBEDDINGS: "3600"
+  CACHE_TTL_SEARCH: "300"
+  CACHE_TTL_SESSION_METADATA: "3600"
+  CACHE_TTL_HISTORY: "3600"
+  CACHE_MAX_HISTORY_MESSAGES: "100"
+
+  # SSE
+  SSE_KEEPALIVE_INTERVAL_SECONDS: "30"
+  SSE_CONNECTION_TIMEOUT_HOURS: "2"
+
+  # Kafka (Phase 2A)
+  KAFKA_ENABLED: "true"
+  KAFKA_BOOTSTRAP_SERVERS: "cortex-kafka:9092"
+  KAFKA_ENABLE_FALLBACK: "true"
+  KAFKA_CONSUMER_GROUP_PREFIX: "cortex"
+
+  # WebSocket (Phase 2B)
+  WEBSOCKET_ENABLED: "true"
+  WEBSOCKET_PING_INTERVAL: "30"
+  WEBSOCKET_MAX_MESSAGE_SIZE: "1048576"
+
+  # StarRocks (Phase 3)
+  STARROCKS_ENABLED: "true"
+  STARROCKS_HOST: "cortex-starrocks-fe"
+  STARROCKS_PORT: "9030"
+  STARROCKS_USER: "root"
+  STARROCKS_DATABASE: "cortex_analytics"
+
+  # RBAC
+  RBAC_ENABLED: "true"
+  PERMISSION_CACHE_TTL_SECONDS: "15"
+
+  # CORS
+  CORS_ORIGINS: '["https://app.cortex.ai","https://cortex.ai"]'
+  CORS_ALLOW_CREDENTIALS: "true"
+
+  # JWT
+  JWT_ALGORITHM: "HS256"
+  JWT_ACCESS_TOKEN_EXPIRE_MINUTES: "60"
+  JWT_REFRESH_TOKEN_EXPIRE_DAYS: "30"
+
+  # Auto-migrate (disable in production, use init container)
+  AUTO_MIGRATE: "false"
+
+---
+# Secret for Cortex-AI API (sensitive configuration)
+#
+# IMPORTANT: This is a template. Create actual secrets using:
+#   kubectl create secret generic cortex-secrets --from-literal=...
+#
+# Or use external secret management (e.g., Sealed Secrets, Vault)
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cortex-secrets
+  namespace: cortex
+type: Opaque
+stringData:
+  # Database URL
+  database-url: "postgresql+asyncpg://cortex:CHANGE_ME@cortex-postgres:5432/cortex"
+
+  # JWT Secrets (comma-separated for rotation)
+  jwt-secrets: "CHANGE_ME_SECRET_1,CHANGE_ME_SECRET_2"
+
+  # Secret key for signing
+  secret-key: "CHANGE_ME_VERY_LONG_RANDOM_STRING"
+
+  # LLM API Keys
+  openai-api-key: "sk-CHANGE_ME"
+  anthropic-api-key: "sk-ant-CHANGE_ME"
+  google-api-key: "CHANGE_ME"
+
+  # StarRocks password (if needed)
+  starrocks-password: ""
+
+---
+# Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cortex
+  labels:
+    name: cortex

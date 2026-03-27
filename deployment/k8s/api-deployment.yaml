@@ -1,0 +1,254 @@
+---
+# Cortex-AI API Deployment
+#
+# Horizontal scaling with 3 replicas, health checks, and graceful shutdown
+#
+# Usage:
+#   kubectl apply -f api-deployment.yaml
+#   kubectl get pods -l app=cortex-api
+#   kubectl logs -f deployment/cortex-api
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cortex-api
+  namespace: cortex
+  labels:
+    app: cortex-api
+    version: v1
+spec:
+  replicas: 3  # Phase 4: Horizontal scaling
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0  # Zero downtime deployment
+  selector:
+    matchLabels:
+      app: cortex-api
+  template:
+    metadata:
+      labels:
+        app: cortex-api
+        version: v1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Service account
+      serviceAccountName: cortex-api
+
+      # Topology spread (distribute across nodes)
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: cortex-api
+
+      # Init containers (run database migrations)
+      initContainers:
+        - name: migrations
+          image: cortex-ai:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Running database migrations..."
+              alembic upgrade head
+              echo "Migrations complete"
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: cortex-secrets
+                  key: database-url
+          envFrom:
+            - configMapRef:
+                name: cortex-config
+
+      # Main application containers
+      containers:
+        - name: api
+          image: cortex-ai:latest
+          imagePullPolicy: IfNotPresent
+
+          # Command
+          command:
+            - uvicorn
+            - cortex.api.main:app
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "8000"
+            - --workers
+            - "4"
+
+          # Ports
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+
+          # Environment variables
+          env:
+            # Database
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: cortex-secrets
+                  key: database-url
+
+            # Redis
+            - name: REDIS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: cortex-config
+                  key: redis-url
+
+            # JWT secrets (for token signing)
+            - name: JWT_SECRETS
+              valueFrom:
+                secretKeyRef:
+                  name: cortex-secrets
+                  key: jwt-secrets
+
+            # Secret key
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cortex-secrets
+                  key: secret-key
+
+            # LLM API keys
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cortex-secrets
+                  key: openai-api-key
+
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cortex-secrets
+                  key: anthropic-api-key
+                  optional: true
+
+            # Kafka (Phase 2A)
+            - name: KAFKA_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: cortex-config
+                  key: kafka-enabled
+
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: cortex-config
+                  key: kafka-bootstrap-servers
+
+            # StarRocks (Phase 3)
+            - name: STARROCKS_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: cortex-config
+                  key: starrocks-enabled
+
+            - name: STARROCKS_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: cortex-config
+                  key: starrocks-host
+
+          # Additional environment from ConfigMap
+          envFrom:
+            - configMapRef:
+                name: cortex-config
+
+          # Resource limits
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+
+          # Health checks
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+
+          # Graceful shutdown
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    echo "Received SIGTERM, starting graceful shutdown..."
+                    sleep 5  # Give time for load balancer to update
+
+          # Security context
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            readOnlyRootFilesystem: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+
+      # Termination grace period (for graceful shutdown)
+      terminationGracePeriodSeconds: 30
+
+      # Restart policy
+      restartPolicy: Always
+
+---
+# Service for Cortex-AI API
+apiVersion: v1
+kind: Service
+metadata:
+  name: cortex-api
+  namespace: cortex
+  labels:
+    app: cortex-api
+spec:
+  type: ClusterIP
+  sessionAffinity: ClientIP  # Session affinity for WebSocket
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 3600  # 1 hour
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      protocol: TCP
+  selector:
+    app: cortex-api
+
+---
+# Service Account
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cortex-api
+  namespace: cortex

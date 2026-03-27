@@ -18,6 +18,7 @@ from cortex.api.routes import (
     auth, accounts, organizations, projects, chat, chat_extensions,
     documents, prompts, agents, skills, models, traces,
     api_keys, audit_logs, usage, feature_flags, webhooks,
+    health, analytics, websocket_chat,
 )
 from cortex.platform.config.settings import get_settings
 from cortex.platform.database import init_db, close_db
@@ -82,10 +83,113 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Failed to initialize checkpointer: {e}")
         logger.info("Falling back to in-memory checkpointer")
 
+    # Initialize Redis caches (Phase 1)
+    try:
+        from cortex.platform.cache.session import get_session_cache
+        from cortex.platform.cache.history import get_history_cache
+        from cortex.rag.cache import get_search_cache
+
+        session_cache = get_session_cache()
+        await session_cache.connect()
+        logger.info("Session cache initialized")
+
+        history_cache = get_history_cache()
+        await history_cache.connect()
+        logger.info("History cache initialized")
+
+        search_cache = get_search_cache()
+        await search_cache.connect()
+        logger.info("Search cache initialized")
+    except Exception as e:
+        logger.warning(f"Cache initialization failed: {e}")
+        logger.info("Caches disabled - will fallback to database")
+
+    # Initialize Kafka producer (Phase 2A)
+    kafka_producer = None
+    if settings.kafka_enabled:
+        try:
+            from cortex.platform.events.kafka_producer import get_kafka_producer
+
+            kafka_producer = get_kafka_producer()
+            await kafka_producer.start()
+            logger.info("Kafka producer initialized")
+        except Exception as e:
+            logger.warning(f"Kafka producer initialization failed: {e}")
+            logger.info("Kafka disabled - events will fallback to logging")
+
+    # Initialize WebSocket connection manager (Phase 2B)
+    ws_manager = None
+    if settings.websocket_enabled:
+        try:
+            from cortex.api.websocket.manager import get_connection_manager
+
+            ws_manager = get_connection_manager()
+            await ws_manager.start()
+            logger.info(f"WebSocket manager initialized (instance: {ws_manager.instance_id})")
+        except Exception as e:
+            logger.warning(f"WebSocket manager initialization failed: {e}")
+            logger.info("WebSocket disabled")
+
+    # Initialize StarRocks client (Phase 3)
+    starrocks_client = None
+    if settings.starrocks_enabled:
+        try:
+            from cortex.platform.analytics.starrocks_client import get_starrocks_client
+
+            starrocks_client = get_starrocks_client()
+            await starrocks_client.connect()
+            logger.info("StarRocks client initialized")
+        except Exception as e:
+            logger.warning(f"StarRocks client initialization failed: {e}")
+            logger.info("Analytics disabled - StarRocks not available")
+
     yield
 
     # Shutdown
     logger.info("Shutting down Cortex-AI Platform API")
+
+    # Close WebSocket connections (Phase 2B)
+    if ws_manager is not None:
+        try:
+            await ws_manager.shutdown()
+            logger.info("WebSocket manager shutdown complete")
+        except Exception as e:
+            logger.warning(f"WebSocket manager shutdown failed: {e}")
+
+    # Flush and close Kafka producer (Phase 2A)
+    if kafka_producer is not None:
+        try:
+            await kafka_producer.stop()
+            logger.info("Kafka producer shutdown complete")
+        except Exception as e:
+            logger.warning(f"Kafka producer shutdown failed: {e}")
+
+    # Close StarRocks client (Phase 3)
+    if starrocks_client is not None:
+        try:
+            await starrocks_client.close()
+            logger.info("StarRocks client closed")
+        except Exception as e:
+            logger.warning(f"StarRocks client close failed: {e}")
+
+    # Close Redis caches (Phase 1)
+    try:
+        from cortex.platform.cache.session import get_session_cache
+        from cortex.platform.cache.history import get_history_cache
+        from cortex.rag.cache import get_search_cache
+
+        session_cache = get_session_cache()
+        await session_cache.close()
+
+        history_cache = get_history_cache()
+        await history_cache.close()
+
+        search_cache = get_search_cache()
+        await search_cache.close()
+
+        logger.info("Caches closed")
+    except Exception as e:
+        logger.warning(f"Cache shutdown failed: {e}")
 
     # Flush Langfuse
     if langfuse_client is not None:
@@ -226,70 +330,7 @@ def create_app() -> FastAPI:
             }
         )
 
-    # Health check endpoint (liveness)
-    @app.get("/health", tags=["health"])
-    async def health_check():
-        """Lightweight liveness probe -- always returns 200 if the process is up."""
-        return {
-            "status": "healthy",
-            "service": "cortex-ai-platform",
-            "version": "0.1.0",
-        }
-
-    # Deep readiness probe (checks all backends)
-    @app.get("/ready", tags=["health"])
-    async def readiness_check():
-        """Deep readiness probe that verifies DB, Redis, Qdrant, and checkpointer connectivity."""
-        import time as _time
-
-        checks: dict = {}
-        overall = True
-        start = _time.monotonic()
-
-        # Database (PostgreSQL)
-        try:
-            from cortex.platform.database.session import get_db_manager
-            db = get_db_manager()
-            async with db.session() as session:
-                await session.execute(select_text("SELECT 1"))
-            checks["database"] = {"status": "ok"}
-        except Exception as e:
-            checks["database"] = {"status": "error", "detail": str(e)[:200]}
-            overall = False
-
-        # Redis
-        try:
-            import redis.asyncio as aioredis
-            r = aioredis.from_url(settings.redis_url, socket_connect_timeout=2)
-            await r.ping()
-            await r.aclose()
-            checks["redis"] = {"status": "ok"}
-        except Exception as e:
-            checks["redis"] = {"status": "error", "detail": str(e)[:200]}
-            overall = False
-
-        # Checkpointer (LangGraph state DB)
-        try:
-            from cortex.orchestration.session.checkpointer import is_checkpointer_healthy
-            healthy = await is_checkpointer_healthy()
-            checks["checkpointer"] = {"status": "ok" if healthy else "degraded"}
-            if not healthy:
-                overall = False
-        except Exception as e:
-            checks["checkpointer"] = {"status": "error", "detail": str(e)[:200]}
-            overall = False
-
-        elapsed_ms = int((_time.monotonic() - start) * 1000)
-
-        payload = {
-            "status": "ready" if overall else "not_ready",
-            "checks": checks,
-            "elapsed_ms": elapsed_ms,
-        }
-
-        if not overall:
-            return JSONResponse(status_code=503, content=payload)
-        return payload
+    # Health check endpoints (Phase 4 - now in dedicated health.py module)
 
     @app.get("/", tags=["root"])
     async def root():
@@ -324,6 +365,20 @@ def create_app() -> FastAPI:
     app.include_router(usage.router)
     app.include_router(feature_flags.router)
     app.include_router(webhooks.router)
+
+    # Phase 2B: WebSocket routes
+    if settings.websocket_enabled:
+        app.include_router(websocket_chat.router)
+        logger.info("WebSocket routes registered")
+
+    # Phase 3: Analytics routes
+    if settings.starrocks_enabled:
+        app.include_router(analytics.router)
+        logger.info("Analytics routes registered")
+
+    # Phase 4: Health check routes (Kubernetes probes)
+    app.include_router(health.router)
+    logger.info("Health check routes registered")
 
     logger.info("All route handlers registered")
 

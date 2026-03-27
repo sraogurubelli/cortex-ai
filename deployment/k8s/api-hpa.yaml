@@ -1,0 +1,95 @@
+---
+# Horizontal Pod Autoscaler for Cortex-AI API
+#
+# Automatically scales API replicas based on CPU and custom metrics
+#
+# Usage:
+#   kubectl apply -f api-hpa.yaml
+#   kubectl get hpa cortex-api
+#   kubectl describe hpa cortex-api
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: cortex-api
+  namespace: cortex
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: cortex-api
+
+  minReplicas: 3
+  maxReplicas: 10
+
+  # Scaling behavior
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300  # 5 minutes
+      policies:
+        - type: Percent
+          value: 50  # Scale down by 50% max
+          periodSeconds: 60
+        - type: Pods
+          value: 2  # Or 2 pods at a time
+          periodSeconds: 60
+      selectPolicy: Min
+
+    scaleUp:
+      stabilizationWindowSeconds: 60  # 1 minute
+      policies:
+        - type: Percent
+          value: 100  # Scale up by 100% max
+          periodSeconds: 30
+        - type: Pods
+          value: 4  # Or 4 pods at a time
+          periodSeconds: 30
+      selectPolicy: Max
+
+  # Metrics
+  metrics:
+    # CPU utilization
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70  # Target 70% CPU
+
+    # Memory utilization
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80  # Target 80% memory
+
+    # Custom metrics (requires Prometheus adapter)
+    # - type: Pods
+    #   pods:
+    #     metric:
+    #       name: http_requests_per_second
+    #     target:
+    #       type: AverageValue
+    #       averageValue: "1000"  # 1000 req/sec per pod
+
+    # - type: Pods
+    #   pods:
+    #     metric:
+    #       name: websocket_connections
+    #     target:
+    #       type: AverageValue
+    #       averageValue: "500"  # 500 WebSocket connections per pod
+
+---
+# PodDisruptionBudget (prevent too many pods down at once)
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cortex-api
+  namespace: cortex
+spec:
+  minAvailable: 2  # Always keep at least 2 pods running
+  selector:
+    matchLabels:
+      app: cortex-api
