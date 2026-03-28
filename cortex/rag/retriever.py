@@ -669,9 +669,12 @@ class Retriever:
             tenant_id=tenant_id,
         )
 
-        # 2. Graph search (extract concept from query using simple keyword extraction)
-        # In production, use NER or LLM to extract concepts
-        concept_names = self._extract_concepts_from_query(query)
+        # 2. Graph search (extract concepts using semantic search)
+        # Uses enable_semantic_concepts setting by default
+        concept_names = await self._extract_concepts_from_query(
+            query,
+            top_k=3,
+        )
 
         graph_results = []
         for concept_name in concept_names[:3]:  # Limit to top 3 concepts
@@ -703,11 +706,73 @@ class Retriever:
         )
         return final_results
 
-    def _extract_concepts_from_query(self, query: str) -> list[str]:
+    async def _extract_concepts_from_query(
+        self,
+        query: str,
+        top_k: int = 3,
+        use_semantic: bool | None = None,
+    ) -> list[str]:
         """
-        Extract potential concept names from query.
+        Extract potential concept names from query using semantic search.
 
-        Simple keyword extraction. In production, use NER or LLM.
+        Uses semantic similarity search in Qdrant concepts collection to find
+        relevant concepts. Falls back to keyword matching if semantic search fails.
+
+        Args:
+            query: Query text
+            top_k: Number of concepts to extract
+            use_semantic: Use semantic search (True) or keyword matching (False).
+                         If None, uses the enable_semantic_concepts setting.
+
+        Returns:
+            list[str]: Concept names relevant to the query
+
+        Example:
+            >>> # Semantic search (finds "machine learning" for query "ML")
+            >>> concepts = await retriever._extract_concepts_from_query("How does ML work?")
+            >>> # Keyword fallback
+            >>> concepts = await retriever._extract_concepts_from_query("Python", use_semantic=False)
+        """
+        # Get feature flag from settings if not explicitly set
+        if use_semantic is None:
+            settings = get_settings()
+            use_semantic = settings.enable_semantic_concepts
+
+        # Feature flag to disable semantic search
+        if not use_semantic:
+            return self._extract_concepts_keyword(query)
+
+        try:
+            # Generate query embedding
+            query_embedding = await self.embeddings.generate_embedding(query)
+
+            # Search concepts collection in Qdrant
+            concept_results = await self.vector_store.search(
+                query_vector=query_embedding,
+                top_k=top_k,
+                collection_name="concepts",
+                filter={"tenant_id": self.tenant_id} if self.tenant_id else None,
+            )
+
+            # Extract concept names from results
+            concept_names = [result["payload"]["name"] for result in concept_results]
+
+            logger.debug(
+                f"Semantic concept search found {len(concept_names)} concepts: {concept_names}"
+            )
+            return concept_names
+
+        except Exception as e:
+            logger.warning(
+                f"Semantic concept search failed: {e}, falling back to keywords"
+            )
+            return self._extract_concepts_keyword(query)
+
+    def _extract_concepts_keyword(self, query: str) -> list[str]:
+        """
+        Extract potential concept names from query using keyword matching.
+
+        Fallback method for when semantic search is disabled or fails.
 
         Args:
             query: Query text
@@ -727,9 +792,18 @@ class Retriever:
 
         # Fallback: if no concepts found, use all non-stopwords
         if not concepts:
-            stopwords = {'the', 'is', 'at', 'which', 'on', 'a', 'an', 'and', 'or', 'but', 'in', 'with', 'to', 'for'}
-            concepts = [w.strip(',.!?;:"\'') for w in words if w.lower() not in stopwords and len(w) > 3]
+            stopwords = {
+                'the', 'is', 'at', 'which', 'on', 'a', 'an', 'and', 'or', 'but',
+                'in', 'with', 'to', 'for', 'of', 'as', 'by', 'from', 'this',
+                'that', 'these', 'those', 'what', 'when', 'where', 'how', 'why',
+            }
+            concepts = [
+                w.strip(',.!?;:"\'')
+                for w in words
+                if w.lower() not in stopwords and len(w) > 3
+            ]
 
+        logger.debug(f"Keyword concept extraction found: {concepts[:5]}")
         return concepts[:5]  # Limit to 5 concepts
 
     def _reciprocal_rank_fusion(

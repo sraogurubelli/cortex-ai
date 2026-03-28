@@ -150,9 +150,12 @@ class VectorStore:
             self.client = None
             logger.info("Disconnected from Qdrant")
 
-    async def collection_exists(self) -> bool:
+    async def collection_exists(self, collection_name: str | None = None) -> bool:
         """
         Check if collection exists.
+
+        Args:
+            collection_name: Collection name to check (defaults to self.collection_name)
 
         Returns:
             bool: True if collection exists
@@ -160,8 +163,10 @@ class VectorStore:
         if self.client is None:
             raise RuntimeError("Not connected. Call connect() first.")
 
+        collection = collection_name or self.collection_name
+
         try:
-            await self.client.get_collection(self.collection_name)
+            await self.client.get_collection(collection)
             return True
         except Exception:
             return False
@@ -241,6 +246,81 @@ class VectorStore:
             logger.error(f"Failed to create collection: {e}")
             raise
 
+    async def create_concepts_collection(
+        self,
+        collection_name: str = "concepts",
+        vector_size: int = 1536,
+        distance_metric: str = "cosine",
+    ) -> None:
+        """
+        Create a separate collection for concept embeddings.
+
+        This collection stores embeddings for concepts/entities extracted from documents,
+        enabling semantic concept search for GraphRAG queries.
+
+        Args:
+            collection_name: Collection name (default: "concepts")
+            vector_size: Embedding dimension (default: 1536 for OpenAI)
+            distance_metric: Distance metric (cosine, euclid, dot)
+
+        Example:
+            >>> await vector_store.create_concepts_collection()
+            >>> # Check it exists
+            >>> exists = await vector_store.collection_exists("concepts")
+        """
+        if self.client is None:
+            raise RuntimeError("Not connected. Call connect() first.")
+
+        # Check if collection already exists
+        if await self.collection_exists(collection_name):
+            logger.info(f"Collection '{collection_name}' already exists")
+            return
+
+        # Map distance metric
+        distance_map = {
+            "cosine": models.Distance.COSINE,
+            "euclid": models.Distance.EUCLID,
+            "dot": models.Distance.DOT,
+        }
+        distance = distance_map.get(distance_metric, models.Distance.COSINE)
+
+        # Create collection with dense vectors only (concepts don't need sparse/keyword search)
+        vectors_config = {
+            "dense": models.VectorParams(
+                size=vector_size,
+                distance=distance,
+                on_disk=False,
+            )
+        }
+
+        try:
+            await self.client.create_collection(
+                collection_name=collection_name,
+                vectors_config=vectors_config,
+                on_disk_payload=False,
+            )
+
+            # Create payload indexes for common filters
+            await self.client.create_payload_index(
+                collection_name=collection_name,
+                field_name="tenant_id",
+                field_schema=models.PayloadSchemaType.KEYWORD,
+            )
+            await self.client.create_payload_index(
+                collection_name=collection_name,
+                field_name="category",
+                field_schema=models.PayloadSchemaType.KEYWORD,
+            )
+
+            logger.info(
+                f"Created concepts collection '{collection_name}' "
+                f"(size={vector_size}, metric={distance_metric})"
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to create concepts collection: {e}")
+            raise
+
     async def delete_collection(self) -> None:
         """
         Delete collection.
@@ -266,6 +346,7 @@ class VectorStore:
         vector: list[float],
         payload: dict[str, Any],
         sparse_vector: dict[str, Any] | None = None,
+        collection_name: str | None = None,
     ) -> None:
         """
         Ingest a document into the vector store.
@@ -276,6 +357,7 @@ class VectorStore:
             payload: Document metadata and content
             sparse_vector: Optional sparse vector for hybrid search
                           Format: {"indices": [1, 5, 10], "values": [0.8, 0.6, 0.4]}
+            collection_name: Collection to ingest into (defaults to self.collection_name)
 
         Example:
             >>> await vector_store.ingest(
@@ -284,9 +366,18 @@ class VectorStore:
             ...     payload={"content": "Python is great", "source": "docs"},
             ...     sparse_vector={"indices": [1, 5], "values": [0.8, 0.6]},
             ... )
+            >>> # Ingest into concepts collection
+            >>> await vector_store.ingest(
+            ...     doc_id="concept-1",
+            ...     vector=[0.1, 0.2, ...],
+            ...     payload={"name": "Python", "category": "Language"},
+            ...     collection_name="concepts",
+            ... )
         """
         if self.client is None:
             raise RuntimeError("Not connected. Call connect() first.")
+
+        collection = collection_name or self.collection_name
 
         # Build vectors dict
         vectors = {"dense": vector}
@@ -298,7 +389,7 @@ class VectorStore:
 
         try:
             await self.client.upsert(
-                collection_name=self.collection_name,
+                collection_name=collection,
                 points=[
                     models.PointStruct(
                         id=doc_id,
@@ -307,7 +398,7 @@ class VectorStore:
                     )
                 ],
             )
-            logger.debug(f"Ingested document {doc_id}")
+            logger.debug(f"Ingested document {doc_id} into {collection}")
 
         except Exception as e:
             logger.error(f"Failed to ingest document {doc_id}: {e}")
@@ -374,6 +465,7 @@ class VectorStore:
         top_k: int = 5,
         filter: dict[str, Any] | None = None,
         score_threshold: float | None = None,
+        collection_name: str | None = None,
     ) -> list[dict[str, Any]]:
         """
         Search for similar documents using dense vector.
@@ -383,6 +475,7 @@ class VectorStore:
             top_k: Number of results to return
             filter: Qdrant filter conditions
             score_threshold: Minimum similarity score (0.0 to 1.0)
+            collection_name: Collection to search (defaults to self.collection_name)
 
         Returns:
             list[dict]: Search results with id, score, and payload
@@ -396,9 +489,17 @@ class VectorStore:
             ... )
             >>> for result in results:
             ...     print(result["id"], result["score"])
+            >>> # Search concepts collection
+            >>> concept_results = await vector_store.search(
+            ...     query_vector=[0.1, 0.2, ...],
+            ...     top_k=3,
+            ...     collection_name="concepts",
+            ... )
         """
         if self.client is None:
             raise RuntimeError("Not connected. Call connect() first.")
+
+        collection = collection_name or self.collection_name
 
         # Build filter
         query_filter = None
@@ -414,7 +515,7 @@ class VectorStore:
 
         try:
             search_result = await self.client.search(
-                collection_name=self.collection_name,
+                collection_name=collection,
                 query_vector=models.NamedVector(
                     name="dense",
                     vector=query_vector,
@@ -433,7 +534,7 @@ class VectorStore:
                 for hit in search_result
             ]
 
-            logger.debug(f"Search returned {len(results)} results")
+            logger.debug(f"Search in {collection} returned {len(results)} results")
             return results
 
         except Exception as e:
@@ -513,12 +614,15 @@ class VectorStore:
             logger.error(f"Hybrid search failed: {e}")
             raise
 
-    async def get_by_id(self, doc_id: str) -> dict[str, Any] | None:
+    async def get_by_id(
+        self, doc_id: str, collection_name: str | None = None
+    ) -> dict[str, Any] | None:
         """
         Get document by ID.
 
         Args:
             doc_id: Document ID
+            collection_name: Collection to search (defaults to self.collection_name)
 
         Returns:
             dict | None: Document with id, vector, and payload
@@ -527,13 +631,17 @@ class VectorStore:
             >>> doc = await vector_store.get_by_id("doc-1")
             >>> if doc:
             ...     print(doc["payload"]["content"])
+            >>> # Get from concepts collection
+            >>> concept = await vector_store.get_by_id("concept-1", collection_name="concepts")
         """
         if self.client is None:
             raise RuntimeError("Not connected. Call connect() first.")
 
+        collection = collection_name or self.collection_name
+
         try:
             points = await self.client.retrieve(
-                collection_name=self.collection_name,
+                collection_name=collection,
                 ids=[doc_id],
                 with_vectors=True,
                 with_payload=True,
@@ -577,12 +685,15 @@ class VectorStore:
             logger.error(f"Failed to delete document {doc_id}: {e}")
             raise
 
-    async def count(self, filter: dict[str, Any] | None = None) -> int:
+    async def count(
+        self, filter: dict[str, Any] | None = None, collection_name: str | None = None
+    ) -> int:
         """
         Count documents in collection.
 
         Args:
             filter: Optional filter conditions
+            collection_name: Collection to count (defaults to self.collection_name)
 
         Returns:
             int: Number of documents
@@ -590,9 +701,13 @@ class VectorStore:
         Example:
             >>> total = await vector_store.count()
             >>> filtered = await vector_store.count(filter={"source": "docs"})
+            >>> # Count concepts
+            >>> concept_count = await vector_store.count(collection_name="concepts")
         """
         if self.client is None:
             raise RuntimeError("Not connected. Call connect() first.")
+
+        collection = collection_name or self.collection_name
 
         # Build filter
         query_filter = None
@@ -608,7 +723,7 @@ class VectorStore:
 
         try:
             result = await self.client.count(
-                collection_name=self.collection_name,
+                collection_name=collection,
                 count_filter=query_filter,
             )
             return result.count

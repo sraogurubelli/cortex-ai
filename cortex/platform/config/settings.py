@@ -175,6 +175,14 @@ class PlatformSettings(BaseSettings):
     )
 
     # =========================================================================
+    # GraphRAG (Phase 0: Semantic Concept Search)
+    # =========================================================================
+    enable_semantic_concepts: bool = Field(
+        default=True,
+        description="Enable semantic concept search (vs keyword matching) for GraphRAG",
+    )
+
+    # =========================================================================
     # StarRocks (Phase 3: OLAP Analytics)
     # =========================================================================
     starrocks_enabled: bool = Field(

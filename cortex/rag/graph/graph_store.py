@@ -416,6 +416,65 @@ class GraphStore:
             logger.debug(f"Found {len(concepts)} concepts for document {doc_id}")
             return concepts
 
+    async def get_all_concepts(
+        self, tenant_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """
+        Get all concepts from the knowledge graph.
+
+        Used for backfilling concept embeddings and analytics.
+
+        Args:
+            tenant_id: Optional tenant ID for filtering
+
+        Returns:
+            list[dict]: List of concept dictionaries with id, name, category, tenant_id
+
+        Example:
+            >>> concepts = await graph.get_all_concepts()
+            >>> print(f"Total concepts: {len(concepts)}")
+            >>> # Filter by tenant
+            >>> tenant_concepts = await graph.get_all_concepts(tenant_id="tenant-1")
+        """
+        if not self._connected or self.driver is None:
+            raise RuntimeError("GraphStore not connected. Call connect() first.")
+
+        # Build query with optional tenant filter
+        if tenant_id:
+            query = """
+            MATCH (c:Concept {tenant_id: $tenant_id})
+            RETURN c.id as id, c.name as name, c.category as category,
+                   c.tenant_id as tenant_id, c.created_at as created_at
+            ORDER BY c.name
+            """
+            params = {"tenant_id": tenant_id}
+        else:
+            query = """
+            MATCH (c:Concept)
+            RETURN c.id as id, c.name as name, c.category as category,
+                   c.tenant_id as tenant_id, c.created_at as created_at
+            ORDER BY c.name
+            """
+            params = {}
+
+        async with self.driver.session() as session:
+            result = await session.run(query, **params)
+            records = await result.values()
+
+            concepts = [
+                {
+                    "id": record[0],
+                    "name": record[1],
+                    "category": record[2],
+                    "tenant_id": record[3],
+                    "created_at": record[4],
+                }
+                for record in records
+            ]
+
+            logger.debug(f"Found {len(concepts)} total concepts")
+            return concepts
+
     async def delete_document(self, doc_id: str) -> bool:
         """
         Delete document and all its relationships.

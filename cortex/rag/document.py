@@ -552,6 +552,14 @@ class DocumentManager:
                 )
                 concept_ids[concept_name] = concept_id
 
+                # NEW: Embed concept and store in Qdrant
+                await self._embed_and_store_concept(
+                    concept_id=concept_id,
+                    concept_name=concept_name,
+                    concept_category=concept_category,
+                    tenant_id=tenant_id,
+                )
+
                 # Add MENTIONS relationship from document to concept
                 await self.graph_store.add_relationship(
                     source_id=doc_id,
@@ -589,4 +597,73 @@ class DocumentManager:
             )
             logger.warning(
                 "Document ingested to vector store but GraphRAG sync failed"
+            )
+
+    async def _embed_and_store_concept(
+        self,
+        concept_id: str,
+        concept_name: str,
+        concept_category: str,
+        tenant_id: str,
+    ) -> None:
+        """
+        Generate embedding for concept and store in Qdrant.
+
+        This method enables semantic concept search by creating embeddings for
+        concepts/entities extracted from documents. The embeddings are stored in
+        a separate "concepts" collection in Qdrant.
+
+        Idempotent: Checks if concept already has an embedding before generating.
+
+        Args:
+            concept_id: Unique concept ID (from Neo4j)
+            concept_name: Concept name (e.g., "Python", "GraphRAG")
+            concept_category: Concept category (e.g., "Technology", "Person")
+            tenant_id: Tenant ID for multi-tenancy
+
+        Example:
+            This method is called automatically during document ingestion when
+            GraphRAG is enabled. It does not need to be called manually.
+        """
+        try:
+            # Check if concept already has embedding (idempotent)
+            existing = await self.vector_store.get_by_id(
+                doc_id=concept_id,
+                collection_name="concepts",
+            )
+            if existing:
+                logger.debug(
+                    f"Concept {concept_name} ({concept_id}) already has embedding, skipping"
+                )
+                return
+
+            # Generate embedding for concept name
+            logger.debug(f"Generating embedding for concept: {concept_name}")
+            concept_embedding = await self.embeddings.generate_embedding(concept_name)
+
+            # Store in Qdrant "concepts" collection
+            await self.vector_store.ingest(
+                doc_id=concept_id,
+                vector=concept_embedding,
+                payload={
+                    "name": concept_name,
+                    "category": concept_category,
+                    "tenant_id": tenant_id,
+                    "neo4j_id": concept_id,  # Link to Neo4j node
+                },
+                collection_name="concepts",
+            )
+
+            logger.debug(
+                f"Embedded and stored concept {concept_name} ({concept_id}) in Qdrant"
+            )
+
+        except Exception as e:
+            # Don't fail the entire ingestion if concept embedding fails
+            logger.error(
+                f"Failed to embed concept {concept_name} ({concept_id}): {e}",
+                exc_info=True,
+            )
+            logger.warning(
+                f"Concept {concept_name} added to Neo4j but not embedded in Qdrant"
             )
