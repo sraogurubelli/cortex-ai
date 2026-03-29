@@ -64,7 +64,8 @@ from cortex.platform.database.repositories import (
     ConversationRepository,
     MessageRepository,
 )
-from cortex.platform.auth import Permission, has_permission
+from cortex.platform.auth import Permission
+from cortex.platform.auth.permissions import has_permission
 from cortex.orchestration.session.orchestrator import SessionOrchestrator, SessionConfig
 
 logger = logging.getLogger(__name__)

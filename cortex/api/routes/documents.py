@@ -19,6 +19,7 @@ from cortex.api.middleware.auth import require_authentication
 from cortex.platform.auth import Permission, require_permission
 from cortex.platform.database import Principal, get_db
 from cortex.platform.database.repositories import ProjectRepository
+from cortex.rag.parsers import parse_file, UnsupportedFileTypeError, FileParsingError
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["documents"])
@@ -136,6 +137,24 @@ class IngestResponse(BaseModel):
     message: str
 
 
+class BatchIngestItem(BaseModel):
+    doc_id: str
+    filename: str
+    chunk_count: int
+
+
+class BatchIngestError(BaseModel):
+    filename: str
+    error: str
+
+
+class BatchIngestResponse(BaseModel):
+    success_count: int
+    error_count: int
+    results: list[BatchIngestItem]
+    errors: Optional[list[BatchIngestError]] = None
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -168,7 +187,24 @@ async def upload_document(
             detail=f"File exceeds {max_size_mb}MB limit",
         )
 
-    content = content_bytes.decode("utf-8", errors="replace")
+    # Parse file based on format (PDF, DOCX, Excel, HTML, Markdown, or plain text)
+    try:
+        content = await parse_file(
+            content_bytes=content_bytes,
+            filename=file.filename or "unknown",
+            content_type=file.content_type,
+        )
+    except UnsupportedFileTypeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=str(e),
+        )
+    except FileParsingError as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Failed to parse file: {str(e)}",
+        )
+
     doc_id = f"doc_{uuid.uuid4().hex[:12]}"
 
     doc_manager, _ = await _get_rag_services()
@@ -215,6 +251,152 @@ async def upload_document(
         doc_id=doc_id,
         chunks=num_chunks,
         message=f"Ingested '{file.filename}' as {num_chunks} chunk(s)",
+    )
+
+
+@router.post(
+    "/projects/{project_uid}/documents/batch",
+    response_model=BatchIngestResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_documents_batch(
+    project_uid: str,
+    files: list[UploadFile] = File(...),
+    principal: Principal = Depends(
+        require_permission(Permission.DOCUMENT_UPLOAD, "project", "project_uid")
+    ),
+    session: AsyncSession = Depends(get_db),
+):
+    """Upload and ingest multiple documents at once (up to 10 files)."""
+    project_repo = ProjectRepository(session)
+    project = await project_repo.find_by_uid(project_uid)
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    # Validate batch size
+    max_batch_size = int(os.getenv("MAX_BATCH_SIZE", "10"))
+    if len(files) > max_batch_size:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Maximum {max_batch_size} files per batch",
+        )
+
+    if not files:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No files provided",
+        )
+
+    max_size_mb = int(os.getenv("MAX_DOCUMENT_SIZE_MB", "10"))
+    doc_manager, _ = await _get_rag_services()
+
+    results: list[BatchIngestItem] = []
+    errors: list[BatchIngestError] = []
+
+    for file in files:
+        try:
+            # Validate size
+            content_bytes = await file.read()
+            if len(content_bytes) > max_size_mb * 1024 * 1024:
+                errors.append(
+                    BatchIngestError(
+                        filename=file.filename or "unknown",
+                        error=f"File exceeds {max_size_mb}MB limit",
+                    )
+                )
+                continue
+
+            # Parse file
+            try:
+                content = await parse_file(
+                    content_bytes=content_bytes,
+                    filename=file.filename or "unknown",
+                    content_type=file.content_type,
+                )
+            except UnsupportedFileTypeError as e:
+                errors.append(BatchIngestError(filename=file.filename or "unknown", error=str(e)))
+                continue
+            except FileParsingError as e:
+                errors.append(
+                    BatchIngestError(
+                        filename=file.filename or "unknown",
+                        error=f"Failed to parse: {str(e)}",
+                    )
+                )
+                continue
+
+            # Ingest document
+            doc_id = f"doc_{uuid.uuid4().hex[:12]}"
+            num_chunks = await doc_manager.ingest_document(
+                doc_id=doc_id,
+                content=content,
+                metadata={
+                    "project_uid": project_uid,
+                    "filename": file.filename,
+                    "content_type": file.content_type,
+                    "uploaded_by": principal.uid,
+                },
+                tenant_id=project_uid,
+            )
+
+            # Extract entities for GraphRAG if enabled
+            if _rag_services.get("graphrag_enabled"):
+                try:
+                    entity_extractor = _rag_services["entity_extractor"]
+                    from cortex.rag.graph import GraphStore
+                    from cortex.rag.graph.schema import Document as GraphDocument
+
+                    graph_store: GraphStore = _rag_services["retriever"].graph_store
+                    extraction = await entity_extractor.extract(content[:5000])
+
+                    await graph_store.store_document(
+                        GraphDocument(
+                            id=doc_id,
+                            title=file.filename or doc_id,
+                            content=content[:2000],
+                            metadata={
+                                "project_uid": project_uid,
+                                "filename": file.filename,
+                            },
+                        ),
+                        concepts=extraction.concepts,
+                        relationships=extraction.relationships,
+                    )
+                    logger.info(
+                        "GraphRAG: extracted %d entities from %s",
+                        len(extraction.concepts),
+                        doc_id,
+                    )
+                except Exception:
+                    logger.warning(
+                        "GraphRAG entity extraction failed for %s",
+                        doc_id,
+                        exc_info=True,
+                    )
+
+            # Success
+            results.append(
+                BatchIngestItem(
+                    doc_id=doc_id,
+                    filename=file.filename or "unknown",
+                    chunk_count=num_chunks,
+                )
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to ingest {file.filename}: {e}", exc_info=True)
+            errors.append(
+                BatchIngestError(
+                    filename=file.filename or "unknown",
+                    error=f"Unexpected error: {str(e)}",
+                )
+            )
+
+    return BatchIngestResponse(
+        success_count=len(results),
+        error_count=len(errors),
+        results=results,
+        errors=errors if errors else None,
     )
 
 
