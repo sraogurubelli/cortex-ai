@@ -68,7 +68,7 @@ class UpdateProjectRequest(BaseModel):
 async def create_project(
     org_uid: str,
     request: CreateProjectRequest,
-    principal: Principal = Depends(require_permission(Permission.ORG_CREATE_PROJECT, "organization", "org_uid")),
+    principal: Principal = Depends(require_permission(Permission.CREATE, "organization", "org_uid")),
     session: AsyncSession = Depends(get_db),
 ):
     """
@@ -132,7 +132,7 @@ async def create_project(
 @router.get("/projects/{uid}", response_model=ProjectInfo)
 async def get_project(
     uid: str,
-    principal: Principal = Depends(require_permission(Permission.PROJECT_VIEW, "project")),
+    principal: Principal = Depends(require_permission(Permission.VIEW, "project")),
     session: AsyncSession = Depends(get_db),
 ):
     """
@@ -167,7 +167,7 @@ async def get_project(
 async def update_project(
     uid: str,
     request: UpdateProjectRequest,
-    principal: Principal = Depends(require_permission(Permission.PROJECT_EDIT, "project")),
+    principal: Principal = Depends(require_permission(Permission.EDIT, "project")),
     session: AsyncSession = Depends(get_db),
 ):
     """
@@ -212,7 +212,7 @@ async def update_project(
 @router.delete("/projects/{uid}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_project(
     uid: str,
-    principal: Principal = Depends(require_permission(Permission.PROJECT_DELETE, "project")),
+    principal: Principal = Depends(require_permission(Permission.DELETE, "project")),
     session: AsyncSession = Depends(get_db),
 ):
     """

@@ -86,7 +86,7 @@ class OrganizationProjects(BaseModel):
 async def create_organization(
     account_uid: str,
     request: CreateOrganizationRequest,
-    principal: Principal = Depends(require_permission(Permission.ACCOUNT_EDIT, "account", "account_uid")),
+    principal: Principal = Depends(require_permission(Permission.EDIT, "account", "account_uid")),
     session: AsyncSession = Depends(get_db),
 ):
     """
@@ -150,7 +150,7 @@ async def create_organization(
 @router.get("/organizations/{uid}", response_model=OrganizationInfo)
 async def get_organization(
     uid: str,
-    principal: Principal = Depends(require_permission(Permission.ORG_VIEW, "organization")),
+    principal: Principal = Depends(require_permission(Permission.VIEW, "organization")),
     session: AsyncSession = Depends(get_db),
 ):
     """
@@ -185,7 +185,7 @@ async def get_organization(
 async def update_organization(
     uid: str,
     request: UpdateOrganizationRequest,
-    principal: Principal = Depends(require_permission(Permission.ORG_EDIT, "organization")),
+    principal: Principal = Depends(require_permission(Permission.EDIT, "organization")),
     session: AsyncSession = Depends(get_db),
 ):
     """
@@ -232,7 +232,7 @@ async def list_organization_projects(
     uid: str,
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    principal: Principal = Depends(require_permission(Permission.ORG_VIEW, "organization")),
+    principal: Principal = Depends(require_permission(Permission.VIEW, "organization")),
     session: AsyncSession = Depends(get_db),
 ):
     """

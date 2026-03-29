@@ -373,7 +373,7 @@ async def chat_stream(
     project_uid: str,
     request: ChatRequest,
     principal: Principal = Depends(
-        require_permission(Permission.CONVERSATION_CREATE, "project", "project_uid")
+        require_permission(Permission.CREATE, "project", "project_uid")
     ),
     session: AsyncSession = Depends(get_db),
 ):
@@ -539,7 +539,7 @@ async def chat(
     project_uid: str,
     request: ChatRequest,
     principal: Principal = Depends(
-        require_permission(Permission.CONVERSATION_CREATE, "project", "project_uid")
+        require_permission(Permission.CREATE, "project", "project_uid")
     ),
     session: AsyncSession = Depends(get_db),
 ):
@@ -632,7 +632,7 @@ async def list_conversations(
     limit: int = 50,
     offset: int = 0,
     principal: Principal = Depends(
-        require_permission(Permission.CONVERSATION_VIEW, "project", "project_uid")
+        require_permission(Permission.VIEW, "project", "project_uid")
     ),
     session: AsyncSession = Depends(get_db),
 ):
@@ -718,7 +718,7 @@ async def get_conversation(
         principal=principal,
         resource_type="project",
         resource_id=project.uid,
-        permission=Permission.CONVERSATION_VIEW,
+        permission=Permission.VIEW,
     )
 
     if not has_access:
@@ -773,7 +773,7 @@ async def delete_conversation(
         principal=principal,
         resource_type="project",
         resource_id=project.uid,
-        permission=Permission.CONVERSATION_DELETE,
+        permission=Permission.DELETE,
     )
 
     if not has_access:

@@ -32,6 +32,27 @@ router = APIRouter(prefix="/api/v1", tags=["documents"])
 _rag_services: dict[str, Any] = {}
 
 
+def _get_storage():
+    """
+    Get storage backend based on STORAGE_TYPE env var.
+
+    Returns:
+        BaseStorage instance (FilesystemStorage or S3Storage)
+    """
+    from cortex.platform.storage import FilesystemStorage
+
+    storage_type = os.getenv("STORAGE_TYPE", "filesystem")
+
+    if storage_type == "s3":
+        from cortex.platform.storage import S3Storage
+        return S3Storage(
+            bucket_name=os.getenv("AWS_S3_BUCKET", "cortex-documents"),
+            region=os.getenv("AWS_REGION", "us-east-1"),
+        )
+    else:
+        return FilesystemStorage(base_path=os.getenv("STORAGE_BASE_PATH", "./uploads"))
+
+
 async def _get_rag_services():
     """Return (DocumentManager, Retriever) singletons, created on first call.
 
@@ -137,6 +158,25 @@ class IngestResponse(BaseModel):
     message: str
 
 
+class DocumentDetailResponse(BaseModel):
+    uid: str
+    filename: str
+    file_url: str
+    file_size: int
+    file_hash: str
+    mime_type: Optional[str]
+    status: str
+    chunk_count: int
+    entity_count: int
+    concept_count: int
+    relationship_count: int
+    embedding_status: Optional[str]
+    graph_status: Optional[str]
+    error_message: Optional[str]
+    created_at: datetime
+    updated_at: datetime
+
+
 class BatchIngestItem(BaseModel):
     doc_id: str
     filename: str
@@ -169,15 +209,35 @@ async def upload_document(
     project_uid: str,
     file: UploadFile = File(...),
     principal: Principal = Depends(
-        require_permission(Permission.DOCUMENT_UPLOAD, "project", "project_uid")
+        require_permission(Permission.CREATE, "project", "project_uid")
     ),
     session: AsyncSession = Depends(get_db),
 ):
-    """Upload and ingest a document into the project's vector store."""
+    """
+    Upload and ingest a document with unified RAG + GraphRAG processing.
+
+    Flow:
+    1. Store file (filesystem or S3)
+    2. Create Document metadata record in PostgreSQL
+    3. Extract text
+    4. Process RAG: chunk → embed → Qdrant
+    5. Process GraphRAG: extract entities/concepts → Neo4j
+    6. Update Document record with processing status
+    """
+    from cortex.platform.database.models import Document
+    from cortex.platform.database.repositories import OrganizationRepository
+    from cortex.platform.storage import FilesystemStorage
+
     project_repo = ProjectRepository(session)
     project = await project_repo.find_by_uid(project_uid)
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    # Get organization for document record
+    org_repo = OrganizationRepository(session)
+    organization = await org_repo.find_by_id(project.organization_id)
+    if not organization:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found")
 
     max_size_mb = int(os.getenv("MAX_DOCUMENT_SIZE_MB", "10"))
     content_bytes = await file.read()
@@ -187,7 +247,31 @@ async def upload_document(
             detail=f"File exceeds {max_size_mb}MB limit",
         )
 
-    # Parse file based on format (PDF, DOCX, Excel, HTML, Markdown, or plain text)
+    doc_id = f"doc_{uuid.uuid4().hex[:12]}"
+
+    # 1. Store file using storage abstraction
+    storage = _get_storage()
+    storage_result = await storage.store_file(
+        file_content=content_bytes,
+        filename=file.filename or "unknown",
+        organization_id=organization.id,
+    )
+
+    # 2. Create Document record in PostgreSQL
+    document = Document(
+        uid=doc_id,
+        organization_id=organization.id,
+        filename=file.filename or "unknown",
+        file_url=storage_result.file_url,
+        file_size=storage_result.file_size,
+        file_hash=storage_result.file_hash,
+        mime_type=file.content_type,
+        status="processing",
+    )
+    session.add(document)
+    await session.flush()
+
+    # 3. Extract text from file
     try:
         content = await parse_file(
             content_bytes=content_bytes,
@@ -195,62 +279,222 @@ async def upload_document(
             content_type=file.content_type,
         )
     except UnsupportedFileTypeError as e:
+        document.status = "failed"
+        document.error_message = str(e)
+        await session.commit()
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             detail=str(e),
         )
     except FileParsingError as e:
+        document.status = "failed"
+        document.error_message = f"Failed to parse file: {str(e)}"
+        await session.commit()
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Failed to parse file: {str(e)}",
         )
 
-    doc_id = f"doc_{uuid.uuid4().hex[:12]}"
+    # 4. Process RAG (Qdrant vector store)
+    try:
+        doc_manager, _ = await _get_rag_services()
+        num_chunks = await doc_manager.ingest_document(
+            doc_id=doc_id,
+            content=content,
+            metadata={
+                "project_uid": project_uid,
+                "organization_id": organization.id,
+                "filename": file.filename,
+                "content_type": file.content_type,
+                "uploaded_by": principal.uid,
+            },
+            tenant_id=f"org_{organization.id}",
+        )
+        document.qdrant_doc_id = doc_id
+        document.chunk_count = num_chunks
+        document.embedding_status = "completed"
+        logger.info(f"RAG processing completed: {num_chunks} chunks for {doc_id}")
+    except Exception as e:
+        document.embedding_status = "failed"
+        document.error_message = f"RAG processing failed: {str(e)}"
+        logger.error(f"RAG processing failed for {doc_id}: {e}", exc_info=True)
 
-    doc_manager, _ = await _get_rag_services()
-    num_chunks = await doc_manager.ingest_document(
-        doc_id=doc_id,
-        content=content,
-        metadata={
-            "project_uid": project_uid,
-            "filename": file.filename,
-            "content_type": file.content_type,
-            "uploaded_by": principal.uid,
-        },
-        tenant_id=project_uid,
-    )
+    # 5. Process GraphRAG (Neo4j knowledge graph)
+    entity_count = 0
+    concept_count = 0
+    relationship_count = 0
 
-    # Extract entities and store in graph when GraphRAG is enabled
     if _rag_services.get("graphrag_enabled"):
         try:
             entity_extractor = _rag_services["entity_extractor"]
             from cortex.rag.graph import GraphStore
-            from cortex.rag.graph.schema import Document as GraphDocument
+            from cortex.rag.graph.schema import Document as Neo4jDocument, Concept, Entity
 
             graph_store: GraphStore = _rag_services["retriever"].graph_store
-            extraction = await entity_extractor.extract(content[:5000])
+            embeddings = _rag_services["doc_manager"].embeddings
+            tenant_id = f"org_{organization.id}"
 
-            await graph_store.store_document(
-                GraphDocument(
-                    id=doc_id,
-                    title=file.filename or doc_id,
-                    content=content[:2000],
-                    metadata={
-                        "project_uid": project_uid,
-                        "filename": file.filename,
-                    },
-                ),
-                concepts=extraction.concepts,
-                relationships=extraction.relationships,
+            # Extract concepts AND entities with embeddings
+            extraction = await entity_extractor.extract_with_embeddings(
+                content[:15000],  # Limit for LLM context
+                embedding_service=embeddings,
             )
-            logger.info("GraphRAG: extracted %d entities from %s", len(extraction.concepts), doc_id)
-        except Exception:
-            logger.warning("GraphRAG entity extraction failed for %s", doc_id, exc_info=True)
+
+            # Add document node to Neo4j
+            await graph_store.add_document(
+                doc_id=doc_id,
+                content=content[:5000],  # Store preview in graph
+                tenant_id=tenant_id,
+            )
+            document.neo4j_doc_id = doc_id
+
+            # Add concepts to Neo4j and link to document
+            for concept_data in extraction.concepts:
+                concept_id = await graph_store.add_concept(
+                    name=concept_data["name"],
+                    category=concept_data.get("category", "general"),
+                    tenant_id=tenant_id,
+                )
+                # Link document to concept
+                await graph_store.add_relationship(
+                    source_id=doc_id,
+                    target_id=concept_id,
+                    rel_type="MENTIONS",
+                    properties={"confidence": 0.9},
+                )
+                concept_count += 1
+
+            # Add entities to Neo4j and link to document
+            entity_id_map = {}  # Map entity names to IDs for relationships
+            for entity_data in extraction.entities:
+                entity_id = await graph_store.add_entity(
+                    name=entity_data["name"],
+                    entity_type=entity_data.get("type", "concept"),
+                    tenant_id=tenant_id,
+                    properties=entity_data.get("properties", {}),
+                    embedding=entity_data.get("embedding"),
+                )
+                entity_id_map[entity_data["name"]] = entity_id
+                # Link document to entity
+                await graph_store.link_document_to_entity(
+                    doc_id=doc_id,
+                    entity_id=entity_id,
+                    tenant_id=tenant_id,
+                )
+                entity_count += 1
+
+            # Add relationships between entities
+            for rel_data in extraction.relationships:
+                source_name = rel_data.get("source")
+                target_name = rel_data.get("target")
+                rel_type = rel_data.get("type", "RELATES_TO")
+
+                # Find entity IDs (could be entity or concept)
+                source_id = entity_id_map.get(source_name)
+                target_id = entity_id_map.get(target_name)
+
+                if source_id and target_id:
+                    await graph_store.add_entity_relationship(
+                        source_id=source_id,
+                        target_id=target_id,
+                        rel_type=rel_type,
+                        properties=rel_data.get("properties", {}),
+                    )
+                    relationship_count += 1
+
+            document.entity_count = entity_count
+            document.concept_count = concept_count
+            document.relationship_count = relationship_count
+            document.graph_status = "completed"
+
+            logger.info(
+                f"GraphRAG processing completed: {concept_count} concepts, "
+                f"{entity_count} entities, {relationship_count} relationships for {doc_id}"
+            )
+
+        except Exception as e:
+            document.graph_status = "failed"
+            if document.error_message:
+                document.error_message += f"; GraphRAG failed: {str(e)}"
+            else:
+                document.error_message = f"GraphRAG processing failed: {str(e)}"
+            logger.error(f"GraphRAG processing failed for {doc_id}: {e}", exc_info=True)
+
+    # 6. Update final status
+    if document.embedding_status == "completed" or document.graph_status == "completed":
+        document.status = "completed"
+    else:
+        document.status = "failed"
+
+    await session.commit()
 
     return IngestResponse(
         doc_id=doc_id,
         chunks=num_chunks,
-        message=f"Ingested '{file.filename}' as {num_chunks} chunk(s)",
+        message=(
+            f"Ingested '{file.filename}' as {num_chunks} chunk(s). "
+            f"GraphRAG: {concept_count} concepts, {entity_count} entities, {relationship_count} relationships"
+        ),
+    )
+
+
+@router.get(
+    "/projects/{project_uid}/documents/{doc_id}/details",
+    response_model=DocumentDetailResponse,
+)
+async def get_document_details(
+    project_uid: str,
+    doc_id: str,
+    principal: Principal = Depends(
+        require_permission(Permission.VIEW, "project", "project_uid")
+    ),
+    session: AsyncSession = Depends(get_db),
+):
+    """
+    Get document details including processing status.
+
+    Returns file metadata, RAG processing status, and GraphRAG statistics.
+    """
+    from cortex.platform.database.models import Document
+    from sqlalchemy import select
+
+    # Verify project exists
+    project_repo = ProjectRepository(session)
+    project = await project_repo.find_by_uid(project_uid)
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    # Get document
+    result = await session.execute(
+        select(Document)
+        .where(Document.uid == doc_id)
+        .where(Document.organization_id == project.organization_id)
+    )
+    document = result.scalar_one_or_none()
+
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found",
+        )
+
+    return DocumentDetailResponse(
+        uid=document.uid,
+        filename=document.filename,
+        file_url=document.file_url,
+        file_size=document.file_size,
+        file_hash=document.file_hash,
+        mime_type=document.mime_type,
+        status=document.status,
+        chunk_count=document.chunk_count,
+        entity_count=document.entity_count,
+        concept_count=document.concept_count,
+        relationship_count=document.relationship_count,
+        embedding_status=document.embedding_status,
+        graph_status=document.graph_status,
+        error_message=document.error_message,
+        created_at=document.created_at,
+        updated_at=document.updated_at,
     )
 
 
@@ -263,7 +507,7 @@ async def upload_documents_batch(
     project_uid: str,
     files: list[UploadFile] = File(...),
     principal: Principal = Depends(
-        require_permission(Permission.DOCUMENT_UPLOAD, "project", "project_uid")
+        require_permission(Permission.CREATE, "project", "project_uid")
     ),
     session: AsyncSession = Depends(get_db),
 ):
@@ -405,7 +649,7 @@ async def list_documents(
     project_uid: str,
     limit: int = Query(default=50, ge=1, le=200),
     principal: Principal = Depends(
-        require_permission(Permission.DOCUMENT_VIEW, "project", "project_uid")
+        require_permission(Permission.VIEW, "project", "project_uid")
     ),
     session: AsyncSession = Depends(get_db),
 ):
@@ -443,7 +687,7 @@ async def delete_document(
     project_uid: str,
     doc_id: str,
     principal: Principal = Depends(
-        require_permission(Permission.DOCUMENT_DELETE, "project", "project_uid")
+        require_permission(Permission.DELETE, "project", "project_uid")
     ),
     session: AsyncSession = Depends(get_db),
 ):
@@ -463,7 +707,7 @@ async def search_documents(
     project_uid: str,
     request: SearchRequest,
     principal: Principal = Depends(
-        require_permission(Permission.DOCUMENT_VIEW, "project", "project_uid")
+        require_permission(Permission.VIEW, "project", "project_uid")
     ),
     session: AsyncSession = Depends(get_db),
 ):

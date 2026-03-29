@@ -135,7 +135,7 @@ async def list_accounts(
 @router.get("/{uid}", response_model=AccountInfo)
 async def get_account(
     uid: str,
-    principal: Principal = Depends(require_permission(Permission.ACCOUNT_VIEW, "account")),
+    principal: Principal = Depends(require_permission(Permission.VIEW, "account")),
     session: AsyncSession = Depends(get_db),
 ):
     """
@@ -169,7 +169,7 @@ async def get_account(
 async def update_account(
     uid: str,
     request: UpdateAccountRequest,
-    principal: Principal = Depends(require_permission(Permission.ACCOUNT_EDIT, "account")),
+    principal: Principal = Depends(require_permission(Permission.EDIT, "account")),
     session: AsyncSession = Depends(get_db),
 ):
     """
@@ -215,7 +215,7 @@ async def list_account_organizations(
     uid: str,
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
-    principal: Principal = Depends(require_permission(Permission.ACCOUNT_VIEW, "account")),
+    principal: Principal = Depends(require_permission(Permission.VIEW, "account")),
     session: AsyncSession = Depends(get_db),
 ):
     """

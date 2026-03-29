@@ -32,6 +32,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -55,12 +56,10 @@ class TokenType(str, PyEnum):
 
 
 class Role(str, PyEnum):
-    """RBAC role enumeration."""
+    """RBAC role enumeration (SIMPLIFIED)."""
 
-    OWNER = "owner"  # Full access including delete
-    ADMIN = "admin"  # Manage resources but cannot delete
-    CONTRIBUTOR = "contributor"  # Create and edit
-    READER = "reader"  # Read-only access
+    ADMIN = "admin"  # Full access: view, create, edit, delete, manage members
+    USER = "user"    # Regular user: view, create, edit (no delete or member management)
 
 
 class AccountStatus(str, PyEnum):
@@ -149,6 +148,7 @@ class Organization(Base):
     account = relationship("Account", back_populates="organizations")
     owner = relationship("Principal", foreign_keys=[owner_id])
     projects = relationship("Project", back_populates="organization", cascade="all, delete-orphan")
+    documents = relationship("Document", back_populates="organization", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<Organization(id={self.id}, uid={self.uid}, name={self.name}, account_id={self.account_id})>"
@@ -173,6 +173,25 @@ class Principal(Base):
     admin = Column(Boolean, nullable=False, default=False)  # System admin flag
     blocked = Column(Boolean, nullable=False, default=False)  # Account blocked
     salt = Column(String(255), nullable=True)  # Password salt (if using password auth)
+
+    # OAuth Support
+    auth_provider = Column(
+        String(50), nullable=False, default="jwt",
+        comment="Auth provider: jwt, google, github, etc"
+    )
+    google_id = Column(
+        String(255), nullable=True, unique=True, index=True,
+        comment="Google account ID (sub claim from ID token)"
+    )
+    picture_url = Column(
+        String(512), nullable=True,
+        comment="Profile picture URL"
+    )
+    email_verified = Column(
+        Boolean, nullable=False, default=False,
+        comment="Email verification status"
+    )
+
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime(timezone=True),
@@ -243,7 +262,7 @@ class Membership(Base):
         String(50), nullable=False, index=True
     )  # "project", "document", etc.
     resource_id = Column(String(255), nullable=False, index=True)  # Resource UUID
-    role = Column(Enum(Role), nullable=False, default=Role.READER)
+    role = Column(Enum(Role), nullable=False, default=Role.USER)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime(timezone=True),
@@ -299,180 +318,60 @@ class Project(Base):
     # Relationships
     organization = relationship("Organization", back_populates="projects")
     owner = relationship("Principal", foreign_keys=[owner_id])
-    conversations = relationship("Conversation", back_populates="project", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<Project(id={self.id}, uid={self.uid}, name={self.name}, org_id={self.organization_id})>"
 
 
-class AuditLog(Base):
+class Document(Base):
     """
-    Audit log entry for tracking mutations across the platform.
+    Document model for file metadata and processing status.
 
-    Records who did what, to which resource, and when.
+    Stores metadata about uploaded documents. Actual file content is stored in:
+    - S3 or filesystem (file_url points to storage location)
+    - Qdrant (chunked embeddings for RAG)
+    - Neo4j (knowledge graph entities/concepts)
+
+    This model tracks processing status across all three storage layers.
     """
 
-    __tablename__ = "audit_logs"
+    __tablename__ = "documents"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     uid = Column(String(255), unique=True, nullable=False, index=True)
-    actor_id = Column(Integer, ForeignKey("principals.id"), nullable=True, index=True)
-    actor_uid = Column(String(255), nullable=True, index=True)
-    action = Column(String(100), nullable=False, index=True)
-    resource_type = Column(String(100), nullable=False, index=True)
-    resource_id = Column(String(255), nullable=True, index=True)
-    resource_name = Column(String(500), nullable=True)
-    detail = Column(Text, nullable=True)
-    ip_address = Column(String(45), nullable=True)
-    request_id = Column(String(255), nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False, index=True)
 
-    actor = relationship("Principal", foreign_keys=[actor_id])
+    # File metadata
+    filename = Column(String(255), nullable=False)
+    file_url = Column(String(512), nullable=False)  # S3 URL or filesystem path
+    file_size = Column(Integer, nullable=False)  # Size in bytes
+    file_hash = Column(String(64), nullable=False, index=True)  # SHA256 hash
+    mime_type = Column(String(100), nullable=True)
 
-    __table_args__ = (
-        Index("idx_audit_actor_created", "actor_id", "created_at"),
-        Index("idx_audit_resource", "resource_type", "resource_id"),
-    )
-
-    def __repr__(self):
-        return f"<AuditLog(id={self.id}, action={self.action}, resource={self.resource_type}/{self.resource_id})>"
-
-
-class UsageRecord(Base):
-    """
-    Usage metering record for per-tenant token/cost tracking.
-
-    Aggregated from session-level model_usage data.
-    """
-
-    __tablename__ = "usage_records"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    tenant_id = Column(String(255), nullable=False, index=True)
-    project_id = Column(String(255), nullable=True, index=True)
-    principal_id = Column(String(255), nullable=True, index=True)
-    model = Column(String(255), nullable=False, index=True)
-    date = Column(Date, nullable=False, index=True)
-    prompt_tokens = Column(Integer, nullable=False, default=0)
-    completion_tokens = Column(Integer, nullable=False, default=0)
-    total_tokens = Column(Integer, nullable=False, default=0)
-    cached_tokens = Column(Integer, nullable=False, default=0)
-    request_count = Column(Integer, nullable=False, default=0)
-    cost_estimate_usd = Column(Float, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        onupdate=func.now(),
+    # Overall processing status
+    status = Column(
+        String(50),
         nullable=False,
-    )
+        default="uploading",
+        index=True,
+    )  # uploading, processing, completed, failed
 
-    __table_args__ = (
-        Index("idx_usage_tenant_date", "tenant_id", "date"),
-        Index("idx_usage_tenant_model_date", "tenant_id", "model", "date"),
-    )
+    # RAG metadata (Qdrant vector store)
+    qdrant_doc_id = Column(String(100), nullable=True, index=True)  # Document ID in Qdrant
+    chunk_count = Column(Integer, nullable=False, default=0)
+    embedding_status = Column(String(50), nullable=True)  # pending, completed, failed
 
-    def __repr__(self):
-        return f"<UsageRecord(tenant={self.tenant_id}, model={self.model}, date={self.date}, tokens={self.total_tokens})>"
+    # GraphRAG metadata (Neo4j knowledge graph)
+    neo4j_doc_id = Column(String(100), nullable=True, index=True)  # Document ID in Neo4j
+    entity_count = Column(Integer, nullable=False, default=0)
+    concept_count = Column(Integer, nullable=False, default=0)
+    relationship_count = Column(Integer, nullable=False, default=0)
+    graph_status = Column(String(50), nullable=True)  # pending, completed, failed
 
+    # Error tracking
+    error_message = Column(Text, nullable=True)
 
-class FeatureFlag(Base):
-    """
-    Lightweight feature flag for per-tenant feature gating.
-    """
-
-    __tablename__ = "feature_flags"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    key = Column(String(255), nullable=False, index=True)
-    tenant_id = Column(String(255), nullable=True, index=True)
-    enabled = Column(Boolean, nullable=False, default=False)
-    description = Column(Text, nullable=True)
-    metadata_json = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        onupdate=func.now(),
-        nullable=False,
-    )
-
-    __table_args__ = (
-        UniqueConstraint("key", "tenant_id", name="uq_flag_key_tenant"),
-    )
-
-    def __repr__(self):
-        return f"<FeatureFlag(key={self.key}, tenant={self.tenant_id}, enabled={self.enabled})>"
-
-
-class Webhook(Base):
-    """
-    Outbound webhook registration.
-
-    Tenants register URLs to receive event notifications.
-    """
-
-    __tablename__ = "webhooks"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    uid = Column(String(255), unique=True, nullable=False, index=True)
-    tenant_id = Column(String(255), nullable=False, index=True)
-    url = Column(String(2048), nullable=False)
-    secret = Column(String(255), nullable=True)
-    events = Column(Text, nullable=False)
-    active = Column(Boolean, nullable=False, default=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        onupdate=func.now(),
-        nullable=False,
-    )
-
-    def __repr__(self):
-        return f"<Webhook(uid={self.uid}, tenant={self.tenant_id}, url={self.url[:50]})>"
-
-
-class WebhookDelivery(Base):
-    """
-    Record of a webhook delivery attempt.
-    """
-
-    __tablename__ = "webhook_deliveries"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    webhook_id = Column(Integer, ForeignKey("webhooks.id", ondelete="CASCADE"), nullable=False, index=True)
-    event_type = Column(String(100), nullable=False)
-    payload = Column(Text, nullable=False)
-    response_status = Column(Integer, nullable=True)
-    response_body = Column(Text, nullable=True)
-    success = Column(Boolean, nullable=False, default=False)
-    attempt = Column(Integer, nullable=False, default=1)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-
-    webhook = relationship("Webhook")
-
-    def __repr__(self):
-        return f"<WebhookDelivery(webhook_id={self.webhook_id}, event={self.event_type}, success={self.success})>"
-
-
-class Conversation(Base):
-    """
-    Conversation model for AI chat sessions.
-
-    Conversations belong to projects and principals.
-    Linked to LangGraph thread_id for session persistence.
-    """
-
-    __tablename__ = "conversations"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    uid = Column(String(255), unique=True, nullable=False, index=True)
-    project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
-    principal_id = Column(Integer, ForeignKey("principals.id"), nullable=False, index=True)
-    thread_id = Column(String(255), nullable=False, index=True)  # LangGraph thread ID
-    title = Column(String(500), nullable=True)  # Auto-generated from first message
-    meta_json = Column("meta_json", Text, nullable=True)  # JSON: {model: "gpt-4o", agent_name: "assistant"}
+    # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime(timezone=True),
@@ -482,43 +381,13 @@ class Conversation(Base):
     )
 
     # Relationships
-    project = relationship("Project", back_populates="conversations")
-    principal = relationship("Principal", foreign_keys=[principal_id])
-    messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan")
+    organization = relationship("Organization", back_populates="documents")
 
-    def __repr__(self):
-        return f"<Conversation(id={self.id}, uid={self.uid}, project_id={self.project_id}, thread_id={self.thread_id})>"
-
-
-class Message(Base):
-    """
-    Message model for conversation history.
-
-    Stores individual messages in conversations (user, assistant, tool).
-    """
-
-    __tablename__ = "messages"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    uid = Column(String(255), unique=True, nullable=False, index=True)
-    conversation_id = Column(Integer, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True)
-    role = Column(String(50), nullable=False)  # 'user', 'assistant', 'system', 'tool'
-    content = Column(Text, nullable=False)
-    tool_calls = Column(Text, nullable=True)  # JSON: [{id: "", name: "", args: {}}]
-    tool_call_id = Column(String(255), nullable=True)  # For tool response messages
-    meta_json = Column("meta_json", Text, nullable=True)  # JSON: {model: "", tokens: {}, cache_metrics: {}}
-    attachments_json = Column(Text, nullable=True)  # JSON: [{id, name, mime_type, size_bytes}]
-    rating = Column(Integer, nullable=True)  # -1 = thumbs down, 0 = neutral, 1 = thumbs up
-    rating_feedback = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-
-    # Relationships
-    conversation = relationship("Conversation", back_populates="messages")
-
-    # Index for efficient message retrieval
+    # Indexes for efficient queries
     __table_args__ = (
-        Index("idx_messages_conversation_created", "conversation_id", "created_at"),
+        Index("idx_documents_org_status", "organization_id", "status"),
+        Index("idx_documents_org_created", "organization_id", "created_at"),
     )
 
     def __repr__(self):
-        return f"<Message(id={self.id}, uid={self.uid}, conversation_id={self.conversation_id}, role={self.role})>"
+        return f"<Document(id={self.id}, uid={self.uid}, filename={self.filename}, status={self.status})>"

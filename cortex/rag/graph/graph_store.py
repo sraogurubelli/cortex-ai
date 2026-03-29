@@ -13,7 +13,7 @@ from typing import Any
 from neo4j import AsyncGraphDatabase, AsyncDriver, AsyncSession
 from neo4j.exceptions import ServiceUnavailable, AuthError
 
-from cortex.rag.graph.schema import Document, Concept
+from cortex.rag.graph.schema import Document, Concept, Entity
 
 logger = logging.getLogger(__name__)
 
@@ -122,9 +122,13 @@ class GraphStore:
         Creates:
         - Unique constraint on Document.id
         - Unique constraint on Concept.id
+        - Unique constraint on Entity.id
         - Index on Document.tenant_id
         - Index on Concept.tenant_id
         - Index on Concept.name
+        - Index on Entity.tenant_id
+        - Index on Entity.name
+        - Index on Entity.type
 
         Idempotent - safe to call multiple times.
         """
@@ -135,6 +139,7 @@ class GraphStore:
             # Unique constraints
             "CREATE CONSTRAINT document_id IF NOT EXISTS FOR (d:Document) REQUIRE d.id IS UNIQUE",
             "CREATE CONSTRAINT concept_id IF NOT EXISTS FOR (c:Concept) REQUIRE c.id IS UNIQUE",
+            "CREATE CONSTRAINT entity_id IF NOT EXISTS FOR (e:Entity) REQUIRE e.id IS UNIQUE",
         ]
 
         indexes = [
@@ -142,6 +147,9 @@ class GraphStore:
             "CREATE INDEX document_tenant IF NOT EXISTS FOR (d:Document) ON (d.tenant_id)",
             "CREATE INDEX concept_tenant IF NOT EXISTS FOR (c:Concept) ON (c.tenant_id)",
             "CREATE INDEX concept_name IF NOT EXISTS FOR (c:Concept) ON (c.name)",
+            "CREATE INDEX entity_tenant IF NOT EXISTS FOR (e:Entity) ON (e.tenant_id)",
+            "CREATE INDEX entity_name IF NOT EXISTS FOR (e:Entity) ON (e.name)",
+            "CREATE INDEX entity_type IF NOT EXISTS FOR (e:Entity) ON (e.type)",
         ]
 
         async with self.driver.session() as session:
@@ -261,6 +269,175 @@ class GraphStore:
                 return record["id"]
             else:
                 raise RuntimeError(f"Failed to add concept '{name}'")
+
+    async def add_entity(
+        self,
+        name: str,
+        entity_type: str,
+        tenant_id: str,
+        properties: dict[str, Any] | None = None,
+        embedding: list[float] | None = None,
+    ) -> str:
+        """
+        Add entity node to graph.
+
+        Uses MERGE to avoid duplicates - returns existing entity if name matches.
+
+        Args:
+            name: Entity name (e.g., "Alice Johnson", "Acme Corp")
+            entity_type: Entity type (person, company, location, product, event)
+            tenant_id: Tenant ID for multi-tenancy
+            properties: Optional entity metadata
+            embedding: Optional vector embedding for GNN (1536-dim)
+
+        Returns:
+            str: Entity ID (UUID)
+
+        Example:
+            >>> entity_id = await graph.add_entity(
+            ...     "Alice Johnson",
+            ...     "person",
+            ...     "tenant-1",
+            ...     {"title": "CEO", "email": "alice@acme.com"},
+            ...     [0.1, 0.2, 0.3]
+            ... )
+        """
+        if not self._connected or self.driver is None:
+            raise RuntimeError("GraphStore not connected. Call connect() first.")
+
+        properties = properties or {}
+
+        # MERGE on name + type + tenant_id to avoid duplicates
+        query = """
+        MERGE (e:Entity {name: $name, type: $entity_type, tenant_id: $tenant_id})
+        ON CREATE SET e.id = $entity_id,
+                      e.properties = $properties,
+                      e.embedding = $embedding,
+                      e.created_at = datetime($created_at)
+        RETURN e.id as id
+        """
+
+        entity_id = str(uuid.uuid4())
+
+        async with self.driver.session() as session:
+            result = await session.run(
+                query,
+                entity_id=entity_id,
+                name=name,
+                entity_type=entity_type,
+                tenant_id=tenant_id,
+                properties=properties,
+                embedding=embedding,
+                created_at=datetime.utcnow().isoformat(),
+            )
+            record = await result.single()
+
+            if record:
+                logger.debug(f"Added/found entity '{name}' ({entity_type}) with ID {record['id']}")
+                return record["id"]
+            else:
+                raise RuntimeError(f"Failed to add entity '{name}'")
+
+    async def link_document_to_entity(
+        self,
+        doc_id: str,
+        entity_id: str,
+        tenant_id: str,
+    ) -> None:
+        """
+        Link document to mentioned entity.
+
+        Args:
+            doc_id: Document ID
+            entity_id: Entity ID
+            tenant_id: Tenant ID for validation
+
+        Example:
+            >>> await graph.link_document_to_entity("doc-123", "entity-789", "tenant-1")
+        """
+        if not self._connected or self.driver is None:
+            raise RuntimeError("GraphStore not connected. Call connect() first.")
+
+        query = """
+        MATCH (d:Document {id: $doc_id, tenant_id: $tenant_id})
+        MATCH (e:Entity {id: $entity_id, tenant_id: $tenant_id})
+        MERGE (d)-[r:MENTIONS]->(e)
+        RETURN type(r) as rel_type
+        """
+
+        async with self.driver.session() as session:
+            result = await session.run(
+                query,
+                doc_id=doc_id,
+                entity_id=entity_id,
+                tenant_id=tenant_id,
+            )
+            record = await result.single()
+
+            if record:
+                logger.debug(f"Linked document {doc_id} to entity {entity_id}")
+            else:
+                logger.warning(
+                    f"Failed to link document to entity (nodes may not exist): "
+                    f"{doc_id} -> {entity_id}"
+                )
+
+    async def add_entity_relationship(
+        self,
+        source_id: str,
+        target_id: str,
+        rel_type: str,
+        properties: dict[str, Any] | None = None,
+    ) -> None:
+        """
+        Add relationship between entities.
+
+        Args:
+            source_id: Source entity ID
+            target_id: Target entity ID
+            rel_type: Relationship type (e.g., "WORKS_AT", "PRODUCES", "LOCATED_IN")
+            properties: Additional relationship properties
+
+        Example:
+            >>> await graph.add_entity_relationship(
+            ...     "entity-person-123",
+            ...     "entity-company-456",
+            ...     "WORKS_AT",
+            ...     {"since": "2020", "role": "CEO"}
+            ... )
+        """
+        if not self._connected or self.driver is None:
+            raise RuntimeError("GraphStore not connected. Call connect() first.")
+
+        properties = properties or {}
+
+        # Use MERGE to avoid duplicate relationships
+        query = f"""
+        MATCH (source:Entity {{id: $source_id}})
+        MATCH (target:Entity {{id: $target_id}})
+        MERGE (source)-[r:{rel_type}]->(target)
+        SET r += $properties
+        RETURN type(r) as rel_type
+        """
+
+        async with self.driver.session() as session:
+            result = await session.run(
+                query,
+                source_id=source_id,
+                target_id=target_id,
+                properties=properties,
+            )
+            record = await result.single()
+
+            if record:
+                logger.debug(
+                    f"Added entity relationship {source_id} -[{rel_type}]-> {target_id}"
+                )
+            else:
+                logger.warning(
+                    f"Failed to create entity relationship (entities may not exist): "
+                    f"{source_id} -[{rel_type}]-> {target_id}"
+                )
 
     async def add_relationship(
         self,
@@ -415,6 +592,132 @@ class GraphStore:
 
             logger.debug(f"Found {len(concepts)} concepts for document {doc_id}")
             return concepts
+
+    async def get_document_entities(
+        self,
+        doc_id: str,
+        tenant_id: str | None = None,
+    ) -> list[Entity]:
+        """
+        Get all entities mentioned by a document.
+
+        Args:
+            doc_id: Document ID
+            tenant_id: Optional tenant ID for filtering
+
+        Returns:
+            list[Entity]: List of entities mentioned by the document
+
+        Example:
+            >>> entities = await graph.get_document_entities("doc-123")
+            >>> for entity in entities:
+            ...     print(f"{entity.name} ({entity.type})")
+        """
+        if not self._connected or self.driver is None:
+            raise RuntimeError("GraphStore not connected. Call connect() first.")
+
+        # Build query with optional tenant filter
+        if tenant_id:
+            query = """
+            MATCH (d:Document {id: $doc_id})-[:MENTIONS]->(e:Entity {tenant_id: $tenant_id})
+            RETURN e.id as id, e.name as name, e.type as type,
+                   e.properties as properties, e.embedding as embedding,
+                   e.tenant_id as tenant_id, e.created_at as created_at
+            ORDER BY e.name
+            """
+            params = {"doc_id": doc_id, "tenant_id": tenant_id}
+        else:
+            query = """
+            MATCH (d:Document {id: $doc_id})-[:MENTIONS]->(e:Entity)
+            RETURN e.id as id, e.name as name, e.type as type,
+                   e.properties as properties, e.embedding as embedding,
+                   e.tenant_id as tenant_id, e.created_at as created_at
+            ORDER BY e.name
+            """
+            params = {"doc_id": doc_id}
+
+        async with self.driver.session() as session:
+            result = await session.run(query, **params)
+            records = await result.values()
+
+            entities = [
+                Entity(
+                    id=record[0],
+                    name=record[1],
+                    type=record[2],
+                    properties=record[3] or {},
+                    embedding=record[4],
+                    tenant_id=record[5],
+                    created_at=record[6],
+                )
+                for record in records
+            ]
+
+            logger.debug(f"Found {len(entities)} entities for document {doc_id}")
+            return entities
+
+    async def get_all_entities(
+        self, tenant_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """
+        Get all entities from the knowledge graph.
+
+        Used for backfilling entity embeddings and analytics.
+
+        Args:
+            tenant_id: Optional tenant ID for filtering
+
+        Returns:
+            list[dict]: List of entity dictionaries
+
+        Example:
+            >>> entities = await graph.get_all_entities()
+            >>> print(f"Total entities: {len(entities)}")
+            >>> # Filter by tenant
+            >>> tenant_entities = await graph.get_all_entities(tenant_id="tenant-1")
+        """
+        if not self._connected or self.driver is None:
+            raise RuntimeError("GraphStore not connected. Call connect() first.")
+
+        # Build query with optional tenant filter
+        if tenant_id:
+            query = """
+            MATCH (e:Entity {tenant_id: $tenant_id})
+            RETURN e.id as id, e.name as name, e.type as type,
+                   e.properties as properties, e.embedding as embedding,
+                   e.tenant_id as tenant_id, e.created_at as created_at
+            ORDER BY e.name
+            """
+            params = {"tenant_id": tenant_id}
+        else:
+            query = """
+            MATCH (e:Entity)
+            RETURN e.id as id, e.name as name, e.type as type,
+                   e.properties as properties, e.embedding as embedding,
+                   e.tenant_id as tenant_id, e.created_at as created_at
+            ORDER BY e.name
+            """
+            params = {}
+
+        async with self.driver.session() as session:
+            result = await session.run(query, **params)
+            records = await result.values()
+
+            entities = [
+                {
+                    "id": record[0],
+                    "name": record[1],
+                    "type": record[2],
+                    "properties": record[3] or {},
+                    "embedding": record[4],
+                    "tenant_id": record[5],
+                    "created_at": record[6],
+                }
+                for record in records
+            ]
+
+            logger.debug(f"Found {len(entities)} total entities")
+            return entities
 
     async def get_all_concepts(
         self, tenant_id: str | None = None

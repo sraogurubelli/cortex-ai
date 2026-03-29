@@ -1,202 +1,70 @@
 """
-Permission Definitions
+Permission Definitions (SIMPLIFIED)
 
-Fine-grained permissions for RBAC system.
-Adapted from harness-code/gitness/types/enum/permission.go
+Simplified permission system with 5 basic permissions for 2 roles.
 """
 
 from enum import Enum
+from cortex.platform.database.models import Role
 
 
 class Permission(str, Enum):
     """
-    Permission enumeration for RBAC.
+    Simplified permission enumeration for RBAC.
 
-    Permissions are organized by resource type.
+    All resources use the same set of permissions.
     """
 
-    # =========================================================================
-    # Account Permissions
-    # =========================================================================
-    ACCOUNT_VIEW = "account_view"  # View account details
-    ACCOUNT_EDIT = "account_edit"  # Edit account settings
-    ACCOUNT_DELETE = "account_delete"  # Delete account
-    ACCOUNT_MANAGE_BILLING = "account_manage_billing"  # Manage subscription & billing
-    ACCOUNT_MANAGE_MEMBERS = "account_manage_members"  # Invite/remove members
-
-    # =========================================================================
-    # Organization Permissions
-    # =========================================================================
-    ORG_VIEW = "org_view"  # View organization details
-    ORG_EDIT = "org_edit"  # Edit organization settings
-    ORG_DELETE = "org_delete"  # Delete organization
-    ORG_MANAGE_MEMBERS = "org_manage_members"  # Invite/remove members
-    ORG_CREATE_PROJECT = "org_create_project"  # Create projects in org
-
-    # =========================================================================
-    # Project Permissions
-    # =========================================================================
-    PROJECT_VIEW = "project_view"  # View project details
-    PROJECT_EDIT = "project_edit"  # Edit project settings
-    PROJECT_DELETE = "project_delete"  # Delete project
-    PROJECT_MANAGE_MEMBERS = "project_manage_members"  # Invite/remove members
-
-    # =========================================================================
-    # Document Permissions (for RAG documents)
-    # =========================================================================
-    DOCUMENT_VIEW = "document_view"  # View documents
-    DOCUMENT_UPLOAD = "document_upload"  # Upload documents
-    DOCUMENT_EDIT = "document_edit"  # Edit document metadata
-    DOCUMENT_DELETE = "document_delete"  # Delete documents
-
-    # =========================================================================
-    # Conversation Permissions (for AI conversations)
-    # =========================================================================
-    CONVERSATION_VIEW = "conversation_view"  # View conversations
-    CONVERSATION_CREATE = "conversation_create"  # Create conversations
-    CONVERSATION_EDIT = "conversation_edit"  # Edit conversation metadata
-    CONVERSATION_DELETE = "conversation_delete"  # Delete conversations
-
-    # =========================================================================
-    # API Key Permissions
-    # =========================================================================
-    APIKEY_VIEW = "apikey_view"  # View API keys
-    APIKEY_CREATE = "apikey_create"  # Create API keys
-    APIKEY_DELETE = "apikey_delete"  # Delete API keys
+    # Resource access (applies to all resources: accounts, orgs, projects, documents, conversations)
+    VIEW = "view"               # View any resource
+    CREATE = "create"           # Create resources (projects, docs, convos)
+    EDIT = "edit"               # Edit resources
+    DELETE = "delete"           # Delete resources (ADMIN only)
+    MANAGE_MEMBERS = "manage_members"  # Add/remove users, assign roles (ADMIN only)
 
 
 # ============================================================================
-# Role-Permission Mappings
+# Role-Permission Mappings (SIMPLIFIED)
 # ============================================================================
 
-ROLE_PERMISSIONS = {
-    # OWNER - Full access to everything
-    "owner": [
-        # Account
-        Permission.ACCOUNT_VIEW,
-        Permission.ACCOUNT_EDIT,
-        Permission.ACCOUNT_DELETE,
-        Permission.ACCOUNT_MANAGE_BILLING,
-        Permission.ACCOUNT_MANAGE_MEMBERS,
-        # Organization
-        Permission.ORG_VIEW,
-        Permission.ORG_EDIT,
-        Permission.ORG_DELETE,
-        Permission.ORG_MANAGE_MEMBERS,
-        Permission.ORG_CREATE_PROJECT,
-        # Project
-        Permission.PROJECT_VIEW,
-        Permission.PROJECT_EDIT,
-        Permission.PROJECT_DELETE,
-        Permission.PROJECT_MANAGE_MEMBERS,
-        # Documents
-        Permission.DOCUMENT_VIEW,
-        Permission.DOCUMENT_UPLOAD,
-        Permission.DOCUMENT_EDIT,
-        Permission.DOCUMENT_DELETE,
-        # Conversations
-        Permission.CONVERSATION_VIEW,
-        Permission.CONVERSATION_CREATE,
-        Permission.CONVERSATION_EDIT,
-        Permission.CONVERSATION_DELETE,
-        # API Keys
-        Permission.APIKEY_VIEW,
-        Permission.APIKEY_CREATE,
-        Permission.APIKEY_DELETE,
-    ],
-    # ADMIN - Manage resources but cannot delete account/org
-    "admin": [
-        # Account
-        Permission.ACCOUNT_VIEW,
-        Permission.ACCOUNT_EDIT,
-        Permission.ACCOUNT_MANAGE_MEMBERS,
-        # Organization
-        Permission.ORG_VIEW,
-        Permission.ORG_EDIT,
-        Permission.ORG_MANAGE_MEMBERS,
-        Permission.ORG_CREATE_PROJECT,
-        # Project
-        Permission.PROJECT_VIEW,
-        Permission.PROJECT_EDIT,
-        Permission.PROJECT_DELETE,
-        Permission.PROJECT_MANAGE_MEMBERS,
-        # Documents
-        Permission.DOCUMENT_VIEW,
-        Permission.DOCUMENT_UPLOAD,
-        Permission.DOCUMENT_EDIT,
-        Permission.DOCUMENT_DELETE,
-        # Conversations
-        Permission.CONVERSATION_VIEW,
-        Permission.CONVERSATION_CREATE,
-        Permission.CONVERSATION_EDIT,
-        Permission.CONVERSATION_DELETE,
-        # API Keys
-        Permission.APIKEY_VIEW,
-        Permission.APIKEY_CREATE,
-        Permission.APIKEY_DELETE,
-    ],
-    # CONTRIBUTOR - Create and edit content
-    "contributor": [
-        # Account
-        Permission.ACCOUNT_VIEW,
-        # Organization
-        Permission.ORG_VIEW,
-        Permission.ORG_CREATE_PROJECT,
-        # Project
-        Permission.PROJECT_VIEW,
-        Permission.PROJECT_EDIT,
-        # Documents
-        Permission.DOCUMENT_VIEW,
-        Permission.DOCUMENT_UPLOAD,
-        Permission.DOCUMENT_EDIT,
-        # Conversations
-        Permission.CONVERSATION_VIEW,
-        Permission.CONVERSATION_CREATE,
-        Permission.CONVERSATION_EDIT,
-        # API Keys
-        Permission.APIKEY_VIEW,
-        Permission.APIKEY_CREATE,
-    ],
-    # READER - Read-only access
-    "reader": [
-        # Account
-        Permission.ACCOUNT_VIEW,
-        # Organization
-        Permission.ORG_VIEW,
-        # Project
-        Permission.PROJECT_VIEW,
-        # Documents
-        Permission.DOCUMENT_VIEW,
-        # Conversations
-        Permission.CONVERSATION_VIEW,
-        # API Keys
-        Permission.APIKEY_VIEW,
-    ],
+ROLE_PERMISSIONS: dict[Role, set[Permission]] = {
+    Role.ADMIN: {
+        Permission.VIEW,
+        Permission.CREATE,
+        Permission.EDIT,
+        Permission.DELETE,
+        Permission.MANAGE_MEMBERS,
+    },
+    Role.USER: {
+        Permission.VIEW,
+        Permission.CREATE,
+        Permission.EDIT,
+    },
 }
 
 
-def get_permissions_for_role(role: str) -> list[Permission]:
+def get_permissions_for_role(role: Role) -> set[Permission]:
     """
     Get all permissions for a role.
 
     Args:
-        role: Role name (owner, admin, contributor, reader)
+        role: Role enum value
 
     Returns:
-        List of permissions
+        Set of permissions
 
     Raises:
         KeyError: If role is invalid
     """
-    return ROLE_PERMISSIONS[role.lower()]
+    return ROLE_PERMISSIONS[role]
 
 
-def has_permission(role: str, permission: Permission) -> bool:
+def has_permission(role: Role, permission: Permission) -> bool:
     """
     Check if a role has a specific permission.
 
     Args:
-        role: Role name
+        role: Role enum value
         permission: Permission to check
 
     Returns:

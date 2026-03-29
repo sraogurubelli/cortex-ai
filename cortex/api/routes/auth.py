@@ -4,15 +4,17 @@ Authentication API Routes
 Handles user signup, login, and token management.
 """
 
+import logging
 import uuid
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cortex.api.middleware.auth import require_authentication
 from cortex.platform.auth import JWTHandler
+from cortex.platform.auth.oauth_google import GoogleOAuthProvider
 from cortex.platform.config import get_settings
 from cortex.platform.database import (
     Principal,
@@ -33,6 +35,49 @@ from cortex.platform.database.repositories import (
 )
 
 router = APIRouter(prefix="/api/v1/auth", tags=["authentication"])
+logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+
+def get_company_name(email: str) -> str | None:
+    """
+    Extract company name from email domain.
+
+    Args:
+        email: User's email address
+
+    Returns:
+        Company name (capitalized) or None for common email providers
+
+    Examples:
+        user@acme.com → "Acme"
+        john@microsoft.com → "Microsoft"
+        personal@gmail.com → None (use display_name instead)
+    """
+    domain = email.split("@")[1]
+
+    # Common email providers → fallback to display name
+    common_providers = [
+        "gmail.com",
+        "yahoo.com",
+        "outlook.com",
+        "hotmail.com",
+        "icloud.com",
+        "protonmail.com",
+        "aol.com",
+        "mail.com",
+        "zoho.com",
+    ]
+    if domain in common_providers:
+        return None
+
+    # Extract company from domain (e.g., "acme.com" → "Acme")
+    company = domain.split(".")[0]
+    return company.capitalize()
 
 
 # ============================================================================
@@ -138,11 +183,14 @@ async def signup(
     )
     account = await account_repo.create(account)
 
-    # Create default organization
+    # Create organization with company name from email
+    company_name = get_company_name(request.email)
+    org_name = company_name if company_name else f"{request.display_name}'s Workspace"
+
     org = Organization(
         uid=f"org_{uuid.uuid4().hex[:12]}",
         account_id=account.id,
-        name="Default Organization",
+        name=org_name,  # e.g., "Acme" or "Alice's Workspace"
         owner_id=principal.id,
     )
     org = await org_repo.create(org)
@@ -152,7 +200,7 @@ async def signup(
         principal_id=principal.id,
         resource_type="account",
         resource_id=account.uid,
-        role=Role.OWNER,
+        role=Role.ADMIN,
     )
     await membership_repo.create(account_membership)
 
@@ -161,7 +209,7 @@ async def signup(
         principal_id=principal.id,
         resource_type="organization",
         resource_id=org.uid,
-        role=Role.OWNER,
+        role=Role.ADMIN,
     )
     await membership_repo.create(org_membership)
 
@@ -355,3 +403,194 @@ async def get_current_user(
         blocked=principal.blocked,
         created_at=principal.created_at,
     )
+
+
+# ============================================================================
+# Google OAuth Endpoints
+# ============================================================================
+
+
+@router.get("/google/login")
+async def google_login(request: Request):
+    """
+    Initiate Google OAuth login flow.
+
+    Returns authorization URL to redirect user to.
+    """
+    settings = get_settings()
+    if not settings.google_oauth_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Google OAuth is not enabled",
+        )
+
+    try:
+        provider = GoogleOAuthProvider()
+        auth_url = await provider.get_authorization_url(request)
+        return {"authorization_url": auth_url}
+    except Exception as e:
+        logger.error(f"Google OAuth init failed: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to initialize Google OAuth",
+        )
+
+
+@router.post("/google/callback", response_model=TokenResponse)
+async def google_callback(
+    code: str = Body(..., embed=True, description="Authorization code from Google"),
+    session: AsyncSession = Depends(get_db),
+):
+    """
+    Handle Google OAuth callback.
+
+    Exchanges authorization code for user info, creates/updates Principal,
+    and returns JWT tokens.
+
+    Args:
+        code: Authorization code from Google
+        session: Database session
+
+    Returns:
+        TokenResponse with access_token and refresh_token
+    """
+    settings = get_settings()
+    if not settings.google_oauth_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Google OAuth is not enabled",
+        )
+
+    try:
+        # Verify token with Google
+        provider = GoogleOAuthProvider()
+        # For POST callback, we receive the ID token directly
+        user_info = await provider.verify_token(code)
+
+        if not user_info:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid Google token",
+            )
+
+        # Check if email is verified
+        if not user_info.get("email_verified"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Email not verified with Google",
+            )
+
+        # Find or create Principal
+        principal_repo = PrincipalRepository(session)
+        principal = await principal_repo.find_by_email(user_info["email"])
+
+        if not principal:
+            # AUTO-PROVISION: Create new user with Google account
+            logger.info(f"Creating new user from Google OAuth: {user_info['email']}")
+
+            # Create Principal
+            principal = Principal(
+                uid=f"usr_{uuid.uuid4().hex[:12]}",
+                email=user_info["email"],
+                display_name=user_info.get("name", user_info["email"].split("@")[0]),
+                principal_type=PrincipalType.USER,
+                admin=user_info["email"] in settings.admin_emails,
+                blocked=False,
+                auth_provider="google",
+                google_id=user_info["google_id"],
+                picture_url=user_info.get("picture"),
+                email_verified=True,
+            )
+            session.add(principal)
+            await session.flush()  # Get principal.id
+
+            # Create Account (tenant)
+            account = Account(
+                uid=f"acc_{uuid.uuid4().hex[:12]}",
+                name=f"{principal.display_name}'s Account",
+                billing_email=principal.email,
+                status=AccountStatus.TRIAL,
+                subscription_tier=SubscriptionTier.FREE,
+                owner_id=principal.id,
+                trial_ends_at=datetime.utcnow() + timedelta(days=14),
+            )
+            session.add(account)
+            await session.flush()
+
+            # Create Organization with company name from email
+            company_name = get_company_name(user_info["email"])
+            org_name = company_name if company_name else f"{principal.display_name}'s Workspace"
+
+            org = Organization(
+                uid=f"org_{uuid.uuid4().hex[:12]}",
+                name=org_name,  # e.g., "Acme" or "Alice's Workspace"
+                account_id=account.id,
+                owner_id=principal.id,
+            )
+            session.add(org)
+            await session.flush()
+
+            # Create Memberships (RBAC)
+            account_membership = Membership(
+                principal_id=principal.id,
+                resource_type="account",
+                resource_id=account.uid,
+                role=Role.ADMIN,
+            )
+            org_membership = Membership(
+                principal_id=principal.id,
+                resource_type="organization",
+                resource_id=org.uid,
+                role=Role.ADMIN,
+            )
+            session.add(account_membership)
+            session.add(org_membership)
+
+            await session.commit()
+            await session.refresh(principal)
+
+            logger.info(f"Auto-provisioned user: {principal.uid} ({principal.email})")
+
+        else:
+            # Update existing Principal with Google info if not already set
+            if not principal.google_id:
+                principal.google_id = user_info["google_id"]
+                principal.auth_provider = "google"
+                principal.picture_url = user_info.get("picture")
+                principal.email_verified = True
+                await session.commit()
+
+        # Check if blocked
+        if principal.blocked:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Account is blocked",
+            )
+
+        # Generate JWT tokens (reuse existing logic)
+        jwt_handler = JWTHandler()
+        access_token = jwt_handler.create_access_token(
+            subject=principal.email,
+            principal_id=principal.id,
+            is_admin=principal.admin,
+        )
+        refresh_token = jwt_handler.create_refresh_token(
+            subject=principal.email,
+            principal_id=principal.id,
+        )
+
+        return TokenResponse(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            token_type="bearer",
+            expires_in=settings.jwt_access_token_expire_minutes * 60,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Google OAuth callback failed: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Authentication failed",
+        )

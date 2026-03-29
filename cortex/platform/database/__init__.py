@@ -1,15 +1,22 @@
 """
 Database Module
 
-SQLAlchemy models for platform features:
+SQLAlchemy models for core platform features:
 - Accounts (billing entities)
 - Organizations (business units)
 - Projects (workspaces)
 - Principals (users/service accounts)
 - Tokens (session, PAT, SAT)
 - Memberships (RBAC)
+- Documents (file metadata and processing status)
 
 Hierarchy: Account → Organization → Project
+
+Storage Layers:
+- PostgreSQL: Core application data (this module)
+- Neo4j: Knowledge graph (entities, concepts, relationships)
+- Qdrant: Vector embeddings (RAG search)
+- S3/Filesystem: Document files (binary storage)
 """
 
 from cortex.platform.database.models import (
@@ -28,15 +35,8 @@ from cortex.platform.database.models import (
     # RBAC
     Membership,
     Role,
-    # Conversations & Messages
-    Conversation,
-    Message,
-    # Platform
-    AuditLog,
-    UsageRecord,
-    FeatureFlag,
-    Webhook,
-    WebhookDelivery,
+    # Documents
+    Document,
 )
 from cortex.platform.database.session import (
     DatabaseManager,
@@ -53,8 +53,6 @@ from cortex.platform.database.repositories import (
     PrincipalRepository,
     TokenRepository,
     MembershipRepository,
-    ConversationRepository,
-    MessageRepository,
 )
 
 __all__ = [
@@ -74,15 +72,8 @@ __all__ = [
     # RBAC
     "Membership",
     "Role",
-    # Conversations & Messages
-    "Conversation",
-    "Message",
-    # Platform
-    "AuditLog",
-    "UsageRecord",
-    "FeatureFlag",
-    "Webhook",
-    "WebhookDelivery",
+    # Documents
+    "Document",
     # Session Management
     "DatabaseManager",
     "get_db_manager",
@@ -97,6 +88,4 @@ __all__ = [
     "PrincipalRepository",
     "TokenRepository",
     "MembershipRepository",
-    "ConversationRepository",
-    "MessageRepository",
 ]

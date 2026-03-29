@@ -1,8 +1,16 @@
 """
 Repository Layer (OLTP)
 
-Data access layer using Repository Pattern.
+Data access layer using Repository Pattern for core models.
 Provides clean API for database operations with async support.
+
+Available repositories:
+- AccountRepository: Account management
+- OrganizationRepository: Organization CRUD
+- ProjectRepository: Project CRUD
+- PrincipalRepository: User/service account management
+- TokenRepository: Session and API token management
+- MembershipRepository: RBAC membership management
 """
 
 from cortex.platform.database.repositories.base import BaseRepository
@@ -12,8 +20,6 @@ from cortex.platform.database.repositories.project import ProjectRepository
 from cortex.platform.database.repositories.principal import PrincipalRepository
 from cortex.platform.database.repositories.token import TokenRepository
 from cortex.platform.database.repositories.membership import MembershipRepository
-from cortex.platform.database.repositories.conversation import ConversationRepository
-from cortex.platform.database.repositories.message import MessageRepository
 
 __all__ = [
     "BaseRepository",
@@ -23,6 +29,4 @@ __all__ = [
     "PrincipalRepository",
     "TokenRepository",
     "MembershipRepository",
-    "ConversationRepository",
-    "MessageRepository",
 ]

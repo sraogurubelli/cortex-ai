@@ -138,7 +138,7 @@ async def search_conversations(
     limit: int = Query(default=20, le=100),
     offset: int = Query(default=0, ge=0),
     principal: Principal = Depends(
-        require_permission(Permission.CONVERSATION_VIEW, "project", "project_uid")
+        require_permission(Permission.VIEW, "project", "project_uid")
     ),
     session: AsyncSession = Depends(get_db),
 ):

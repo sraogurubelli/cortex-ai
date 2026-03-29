@@ -46,18 +46,18 @@ tasks:
     desc: Complete development environment setup
     deps: [install, docker:up]
     cmds:
-      - task: db:migrate
       - echo "✅ Development environment ready!"
       - echo "Run 'task dev' to start the development server"
 
   fresh:
-    desc: Fresh start - create venv, reset database, setup (no API start; run task dev to run locally)
+    desc: Cleanup everything and setup (reset Docker, install deps, ready for task dev)
     cmds:
       - echo "🔄 Starting fresh development environment..."
       - task: ensure-venv
       - task: docker:reset
       - task: setup
-      - echo "✅ Fresh environment ready. Run 'task dev' to start the API locally."
+      - echo "✅ Fresh environment ready!"
+      - echo "   Run 'task dev' to run migrations and start the server"
 
   clean:
     desc: Clean build artifacts and cache
@@ -142,8 +142,10 @@ tasks:
   # =========================================================================
 
   dev:
-    desc: Run development server with auto-reload (Docker not started; run task docker:up if needed)
+    desc: Run migrations and start development server
     cmds:
+      - task: db:migrate
+      - echo "🚀 Starting development server on http://localhost:8000"
       - exec sh -c 'exec "$(test -d .venv && echo .venv/bin/python || echo python3)" -m cortex.api.main'
 
   dev:debug:
@@ -201,9 +203,9 @@ tasks:
   # =========================================================================
 
   db:migrate:
-    desc: Run database migrations (create tables)
+    desc: Run database migrations (Alembic - creates tables)
     cmds:
-      - '{{.PYTHON}} -c "import asyncio; from cortex.platform.database import init_db; asyncio.run(init_db())"'
+      - alembic upgrade head
       - echo "✅ Database migrations completed"
 
   db:shell:
@@ -276,17 +278,27 @@ tasks:
       - echo "Cortex-AI Development Tasks"
       - echo ""
       - echo "Quick Start:"
-      - echo "  task setup        - Complete development environment setup"
-      - echo "  task fresh        - Reset DB, setup, and run dev server (fresh start)"
-      - echo "  task dev          - Run development server"
-      - echo "  task test         - Run all tests"
+      - echo "  task fresh        - Cleanup everything (reset Docker, install deps)"
+      - echo "  task dev          - Run migrations + start server (normal workflow)"
       - echo ""
-      - echo "Common Tasks:"
+      - echo "Typical Workflow:"
+      - echo "  1. First time -> task fresh, then task dev"
+      - echo "  2. Daily dev -> task dev (runs migrations + starts server)"
+      - echo "  3. After changes -> Ctrl+C, then task dev again"
+      - echo ""
+      - echo "Database:"
+      - echo "  task db:migrate   - Run Alembic migrations only"
+      - echo "  task db:reset     - Drop and recreate database"
+      - echo "  task db:shell     - Open PostgreSQL shell"
+      - echo ""
+      - echo "Code Quality:"
       - echo "  task format       - Format code with Black and Ruff"
       - echo "  task lint         - Run linters (Ruff, Mypy, Bandit)"
-      - echo "  task test:unit    - Run unit tests"
+      - echo "  task test         - Run all tests"
+      - echo ""
+      - echo "Docker:"
       - echo "  task docker:up    - Start Docker services"
-      - echo "  task db:reset     - Reset database (drop and recreate)"
+      - echo "  task docker:down  - Stop Docker services"
       - echo ""
       - echo "Run 'task --list' for all available tasks"
 

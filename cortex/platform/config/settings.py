@@ -73,6 +73,24 @@ class PlatformSettings(BaseSettings):
         default=True, description="Allow credentials in CORS"
     )
 
+    # Google OAuth
+    google_oauth_enabled: bool = Field(
+        default=False,
+        description="Enable Google OAuth authentication"
+    )
+    google_client_id: str | None = Field(
+        default=None,
+        description="Google OAuth client ID"
+    )
+    google_client_secret: str | None = Field(
+        default=None,
+        description="Google OAuth client secret"
+    )
+    google_redirect_uri: str = Field(
+        default="http://localhost:3000/auth/google/callback",
+        description="Google OAuth redirect URI"
+    )
+
     # =========================================================================
     # Authorization (RBAC)
     # =========================================================================

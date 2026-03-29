@@ -15,11 +15,25 @@ from sqlalchemy import text as select_text
 
 from cortex.api.middleware.auth import AuthenticationMiddleware
 from cortex.api.routes import (
-    auth, accounts, organizations, projects, chat, chat_extensions,
-    documents, prompts, agents, skills, models, traces,
-    api_keys, audit_logs, usage, feature_flags, webhooks,
-    health, analytics, websocket_chat,
+    # Core routes (Account, Organization, Project, Principal, Token, Membership, Document)
+    auth,
+    accounts,
+    organizations,
+    projects,
+    documents,
+    knowledge,  # Neo4j-based knowledge graph
+    health,
 )
+# Non-core routes (disabled - can be added back incrementally)
+# from cortex.api.routes import (
+#     chat, chat_extensions, websocket_chat,  # Require Conversation, Message models
+#     audit_logs,  # Requires AuditLog model
+#     usage,  # Requires UsageRecord model
+#     feature_flags,  # Requires FeatureFlag model
+#     webhooks,  # Requires Webhook, WebhookDelivery models
+#     analytics,  # Requires Message model
+#     prompts, agents, skills, models, traces, api_keys,  # TBD
+# )
 from cortex.platform.config.settings import get_settings
 from cortex.platform.database import init_db, close_db
 
@@ -301,12 +315,14 @@ def create_app() -> FastAPI:
         logger.warning(f"Rate limiting middleware skipped: {e}")
 
     # Audit logging middleware (records mutations to audit_logs table)
-    try:
-        from cortex.api.middleware.audit import AuditMiddleware
-        app.add_middleware(AuditMiddleware)
-        logger.info("Audit logging middleware enabled")
-    except Exception as e:
-        logger.warning(f"Audit middleware skipped: {e}")
+    # NOTE: Disabled - AuditLog model removed in database cleanup
+    # Can be re-enabled when audit logging is added back incrementally
+    # try:
+    #     from cortex.api.middleware.audit import AuditMiddleware
+    #     app.add_middleware(AuditMiddleware)
+    #     logger.info("Audit logging middleware enabled")
+    # except Exception as e:
+    #     logger.warning(f"Audit middleware skipped: {e}")
 
     # Exception handlers
     @app.exception_handler(Exception)
@@ -347,38 +363,38 @@ def create_app() -> FastAPI:
             "docs": "/api/docs" if settings.app_env != "production" else None,
         }
 
-    # Register route handlers
+    # Register core route handlers
     app.include_router(auth.router)
     app.include_router(accounts.router)
     app.include_router(organizations.router)
     app.include_router(projects.router)
-    app.include_router(chat.router)
-    app.include_router(chat_extensions.router)
     app.include_router(documents.router)
-    app.include_router(prompts.router)
-    app.include_router(agents.router)
-    app.include_router(skills.router)
-    app.include_router(models.router)
-    app.include_router(traces.router)
-    app.include_router(api_keys.router)
-    app.include_router(audit_logs.router)
-    app.include_router(usage.router)
-    app.include_router(feature_flags.router)
-    app.include_router(webhooks.router)
-
-    # Phase 2B: WebSocket routes
-    if settings.websocket_enabled:
-        app.include_router(websocket_chat.router)
-        logger.info("WebSocket routes registered")
-
-    # Phase 3: Analytics routes
-    if settings.starrocks_enabled:
-        app.include_router(analytics.router)
-        logger.info("Analytics routes registered")
-
-    # Phase 4: Health check routes (Kubernetes probes)
+    app.include_router(knowledge.router)  # Neo4j knowledge graph
     app.include_router(health.router)
-    logger.info("Health check routes registered")
+
+    # Non-core routes (disabled - can be added back incrementally)
+    # app.include_router(chat.router)  # Requires Conversation, Message
+    # app.include_router(chat_extensions.router)  # Requires Conversation, Message
+    # app.include_router(prompts.router)  # TBD
+    # app.include_router(agents.router)  # TBD
+    # app.include_router(skills.router)  # TBD
+    # app.include_router(models.router)  # TBD
+    # app.include_router(traces.router)  # TBD
+    # app.include_router(api_keys.router)  # TBD
+    # app.include_router(audit_logs.router)  # Requires AuditLog
+    # app.include_router(usage.router)  # Requires UsageRecord
+    # app.include_router(feature_flags.router)  # Requires FeatureFlag
+    # app.include_router(webhooks.router)  # Requires Webhook, WebhookDelivery
+
+    # Phase 2B: WebSocket routes (disabled - requires Conversation, Message)
+    # if settings.websocket_enabled:
+    #     app.include_router(websocket_chat.router)
+    #     logger.info("WebSocket routes registered")
+
+    # Phase 3: Analytics routes (disabled - requires Message model)
+    # if settings.starrocks_enabled:
+    #     app.include_router(analytics.router)
+    #     logger.info("Analytics routes registered")
 
     logger.info("All route handlers registered")
 

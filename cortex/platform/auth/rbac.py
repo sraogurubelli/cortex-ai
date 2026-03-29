@@ -11,8 +11,9 @@ from typing import Optional
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from cortex.platform.auth.permissions import Permission, has_permission as role_has_permission
+from cortex.platform.auth.permissions import Permission, ROLE_PERMISSIONS
 from cortex.platform.database import Principal, MembershipRepository
+from cortex.platform.database.repositories import ProjectRepository
 
 
 class PermissionChecker:
@@ -50,7 +51,13 @@ class PermissionChecker:
         permission: Permission,
     ) -> bool:
         """
-        Check if principal has permission on resource.
+        Check if principal has permission on resource (SIMPLIFIED).
+
+        Simplified logic:
+        1. System admin → always True
+        2. Blocked → always False
+        3. Get principal's role on resource (or parent)
+        4. Check if role grants permission
 
         Args:
             principal: Principal to check
@@ -61,44 +68,58 @@ class PermissionChecker:
         Returns:
             True if principal has permission, False otherwise
         """
-        # System admins bypass all checks
+        # System admin bypass
         if principal.admin:
             return True
 
-        # Check if principal is blocked
+        # Blocked principals denied
         if principal.blocked:
             return False
 
-        # Try cache first
+        # Try cache first (stores role as string)
+        cache_key = f"perm:{principal.id}:{permission}:{resource_type}:{resource_id}"
         if self.redis:
-            cached_role = await self._get_cached_role(
-                principal.id, resource_type, resource_id
-            )
-            if cached_role is not None:
-                return role_has_permission(cached_role, permission)
+            cached = await self.redis.get(cache_key)
+            if cached is not None:
+                cached_value = cached.decode("utf-8") if isinstance(cached, bytes) else cached
+                if cached_value == "true":
+                    return True
+                elif cached_value == "false":
+                    return False
 
-        # Cache miss - query database
+        # Get role on resource
         role = await self.membership_repo.get_role(
             principal_id=principal.id,
             resource_type=resource_type,
             resource_id=resource_id,
         )
 
-        # No membership found
-        if role is None:
-            # Cache negative result (empty string indicates no membership)
-            if self.redis:
-                await self._cache_role(principal.id, resource_type, resource_id, "")
-            return False
+        # If no direct membership, check parent resource
+        if not role and resource_type == "project":
+            # Try org membership (inherit from organization)
+            # This fixes the "no project membership" issue
+            project_repo = ProjectRepository(self.session)
+            project = await project_repo.find_by_uid(resource_id)
+            if project:
+                org_role = await self.membership_repo.get_role(
+                    principal_id=principal.id,
+                    resource_type="organization",
+                    resource_id=project.organization.uid,
+                )
+                role = org_role  # Inherit role from org
 
-        # Cache positive result
+        if not role:
+            result = False
+        else:
+            # Check if role grants permission (using simplified mapping)
+            allowed_permissions = ROLE_PERMISSIONS.get(role, set())
+            result = permission in allowed_permissions
+
+        # Cache result
         if self.redis:
-            await self._cache_role(
-                principal.id, resource_type, resource_id, role.value
-            )
+            await self.redis.setex(cache_key, self.cache_ttl, "true" if result else "false")
 
-        # Check if role has permission
-        return role_has_permission(role.value, permission)
+        return result
 
     async def check_any(
         self,

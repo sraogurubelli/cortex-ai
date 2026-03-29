@@ -30,10 +30,8 @@ if database_url:
 # ---------------------------------------------------------------------------
 from cortex.platform.database.models import Base  # noqa: E402
 
-# Route-defined models — import so their tables are included in autogenerate
-import cortex.api.routes.agents  # noqa: E402, F401
-import cortex.api.routes.skills  # noqa: E402, F401
-import cortex.api.routes.models  # noqa: E402, F401
+# All core models are now in cortex.platform.database.models
+# No need to import route modules
 
 target_metadata = Base.metadata
 
