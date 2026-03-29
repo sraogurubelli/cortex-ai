@@ -253,11 +253,10 @@ cortex-ai/
 │
 ├── examples/                       # Comprehensive examples
 ├── docs/                           # Documentation
-│   ├── CHAT_API.md                # Chat interaction API reference
-│   ├── ORCHESTRATION_ARCHITECTURE.md  # Architecture guide
-│   ├── QUICK_START.md             # Getting started
-│   ├── RAG.md                     # RAG documentation
-│   └── ...                        # Memory, GraphRAG, prompt caching guides
+│   ├── architecture/              # Architecture deep-dives
+│   ├── guides/                    # User guides and how-tos
+│   ├── EXECUTIVE_BRIEF.md         # High-level overview
+│   └── CLAUDE_CODE_GUIDE.md       # Claude Code development guide
 │
 ├── requirements.txt                # Dependencies
 └── README.md                       # This file
@@ -412,13 +411,25 @@ Total: **52+ individual demos** across 10 example files
 
 ## Documentation
 
-Comprehensive documentation with 35,000+ words:
+Comprehensive documentation organized by category:
 
-- **[CHAT_API.md](docs/CHAT_API.md)** - Chat interaction API reference (endpoints, SSE events, schemas, safety)
-- **[ORCHESTRATION_ARCHITECTURE.md](docs/ORCHESTRATION_ARCHITECTURE.md)** - 12,000-word architecture deep dive
-- **[QUICK_START.md](docs/QUICK_START.md)** - 5-minute getting started guide
-- **[RAG.md](docs/RAG.md)** - Complete RAG documentation
-- **[COMPLETION_SUMMARY.md](docs/COMPLETION_SUMMARY.md)** - Implementation summary
+**Getting Started:**
+- **[Executive Brief](docs/EXECUTIVE_BRIEF.md)** - High-level overview and value proposition
+- **[Quick Start Guide](docs/guides/QUICK_START.md)** - Get started in 5 minutes
+- **[Claude Code Guide](docs/CLAUDE_CODE_GUIDE.md)** - Development with Claude Code
+
+**Architecture:**
+- **[Orchestration Architecture](docs/architecture/ORCHESTRATION_ARCHITECTURE.md)** - Multi-agent orchestration
+- **[Document Processing](docs/architecture/DOCUMENT_PROCESSING_ARCHITECTURE.md)** - Multi-format parsing and RAG
+- **[Reasoning Layer](docs/architecture/REASONING_LAYER_ARCHITECTURE.md)** - Agent reasoning
+
+**User Guides:**
+- **[Chat API](docs/guides/CHAT_API.md)** - REST API and WebSocket endpoints
+- **[RAG](docs/guides/RAG.md)** - Retrieval-Augmented Generation
+- **[GraphRAG](docs/guides/GRAPHRAG.md)** - Knowledge graph-enhanced retrieval
+- **[Memory Strategy](docs/guides/MEMORY_STRATEGY.md)** - Memory middleware
+
+See **[docs/README.md](docs/README.md)** for complete documentation index.
 
 ## Roadmap
 
