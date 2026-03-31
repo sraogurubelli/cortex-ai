@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.sessions import SessionMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text as select_text
 
@@ -249,6 +250,9 @@ def create_app() -> FastAPI:
         docs_url="/api/docs" if settings.app_env != "production" else None,
         redoc_url="/api/redoc" if settings.app_env != "production" else None,
     )
+
+    # Session middleware (required by authlib for OAuth state)
+    app.add_middleware(SessionMiddleware, secret_key=settings.secret_key)
 
     # CORS middleware
     app.add_middleware(

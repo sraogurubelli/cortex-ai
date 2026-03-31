@@ -139,21 +139,16 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
         return None
 
     async def _load_principal(self, claims: TokenClaims) -> Optional[Principal]:
-        """
-        Load principal from database based on token claims.
-
-        Args:
-            claims: Token claims
-
-        Returns:
-            Principal instance or None
-        """
         if not claims.principal_id:
+            return None
+
+        principal_uuid = claims.principal_uuid
+        if not principal_uuid:
             return None
 
         async with self.db_manager.session() as session:
             result = await session.execute(
-                select(Principal).where(Principal.id == claims.principal_id)
+                select(Principal).where(Principal.id == principal_uuid)
             )
             return result.scalar_one_or_none()
 

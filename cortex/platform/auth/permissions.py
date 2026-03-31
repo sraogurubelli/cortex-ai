@@ -5,7 +5,7 @@ Simplified permission system with 5 basic permissions for 2 roles.
 """
 
 from enum import Enum
-from cortex.platform.database.models import Role
+from cortex.platform.database.models import MembershipRole
 
 
 class Permission(str, Enum):
@@ -15,27 +15,26 @@ class Permission(str, Enum):
     All resources use the same set of permissions.
     """
 
-    # Resource access (applies to all resources: accounts, orgs, projects, documents, conversations)
-    VIEW = "view"               # View any resource
-    CREATE = "create"           # Create resources (projects, docs, convos)
-    EDIT = "edit"               # Edit resources
-    DELETE = "delete"           # Delete resources (ADMIN only)
-    MANAGE_MEMBERS = "manage_members"  # Add/remove users, assign roles (ADMIN only)
+    VIEW = "view"
+    CREATE = "create"
+    EDIT = "edit"
+    DELETE = "delete"
+    MANAGE_MEMBERS = "manage_members"
 
 
 # ============================================================================
 # Role-Permission Mappings (SIMPLIFIED)
 # ============================================================================
 
-ROLE_PERMISSIONS: dict[Role, set[Permission]] = {
-    Role.ADMIN: {
+ROLE_PERMISSIONS: dict[MembershipRole, set[Permission]] = {
+    MembershipRole.ADMIN: {
         Permission.VIEW,
         Permission.CREATE,
         Permission.EDIT,
         Permission.DELETE,
         Permission.MANAGE_MEMBERS,
     },
-    Role.USER: {
+    MembershipRole.USER: {
         Permission.VIEW,
         Permission.CREATE,
         Permission.EDIT,
@@ -43,33 +42,13 @@ ROLE_PERMISSIONS: dict[Role, set[Permission]] = {
 }
 
 
-def get_permissions_for_role(role: Role) -> set[Permission]:
-    """
-    Get all permissions for a role.
-
-    Args:
-        role: Role enum value
-
-    Returns:
-        Set of permissions
-
-    Raises:
-        KeyError: If role is invalid
-    """
+def get_permissions_for_role(role: MembershipRole) -> set[Permission]:
+    """Get all permissions for a membership role."""
     return ROLE_PERMISSIONS[role]
 
 
-def has_permission(role: Role, permission: Permission) -> bool:
-    """
-    Check if a role has a specific permission.
-
-    Args:
-        role: Role enum value
-        permission: Permission to check
-
-    Returns:
-        True if role has permission, False otherwise
-    """
+def has_permission(role: MembershipRole, permission: Permission) -> bool:
+    """Check if a membership role has a specific permission."""
     try:
         role_perms = get_permissions_for_role(role)
         return permission in role_perms

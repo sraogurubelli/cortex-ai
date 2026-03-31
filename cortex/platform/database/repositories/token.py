@@ -1,13 +1,10 @@
-"""
-Token Repository
+"""Token Repository"""
 
-Data access layer for Token model.
-"""
-
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
+from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import select, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cortex.platform.database.models import Token, TokenType
@@ -18,42 +15,21 @@ class TokenRepository(BaseRepository[Token]):
     """Repository for Token operations."""
 
     def __init__(self, session: AsyncSession):
-        """Initialize token repository."""
         super().__init__(Token, session)
 
     async def find_by_principal(
-        self, principal_id: int, token_type: Optional[TokenType] = None
+        self, principal_id: UUID | str, token_type: Optional[TokenType] = None
     ) -> List[Token]:
-        """
-        Find all tokens for a principal.
-
-        Args:
-            principal_id: Principal ID
-            token_type: Optional token type filter
-
-        Returns:
-            List of tokens
-        """
+        if isinstance(principal_id, str):
+            principal_id = UUID(principal_id)
         query = select(Token).where(Token.principal_id == principal_id)
-
         if token_type:
             query = query.where(Token.token_type == token_type)
-
         query = query.order_by(Token.created_at.desc())
-
         result = await self.session.execute(query)
         return list(result.scalars().all())
 
     async def find_by_hash(self, token_hash: str) -> Optional[Token]:
-        """
-        Find token by hash.
-
-        Args:
-            token_hash: Hashed token value
-
-        Returns:
-            Token instance or None
-        """
         result = await self.session.execute(
             select(Token).where(Token.token_hash == token_hash)
         )
@@ -62,17 +38,6 @@ class TokenRepository(BaseRepository[Token]):
     async def find_by_type(
         self, token_type: TokenType, limit: int = 100, offset: int = 0
     ) -> List[Token]:
-        """
-        Find tokens by type.
-
-        Args:
-            token_type: Token type
-            limit: Maximum number of results
-            offset: Offset for pagination
-
-        Returns:
-            List of tokens
-        """
         result = await self.session.execute(
             select(Token)
             .where(Token.token_type == token_type)
@@ -83,59 +48,27 @@ class TokenRepository(BaseRepository[Token]):
         return list(result.scalars().all())
 
     async def find_expired(self, limit: int = 100) -> List[Token]:
-        """
-        Find expired tokens.
-
-        Args:
-            limit: Maximum number of results
-
-        Returns:
-            List of expired tokens
-        """
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         result = await self.session.execute(
             select(Token)
-            .where(
-                Token.expires_at.isnot(None),
-                Token.expires_at < now,
-            )
+            .where(Token.expires_at.isnot(None), Token.expires_at < now)
             .order_by(Token.expires_at.asc())
             .limit(limit)
         )
         return list(result.scalars().all())
 
-    async def update_last_used(self, token_id: int) -> bool:
-        """
-        Update token's last_used_at timestamp.
-
-        Args:
-            token_id: Token ID
-
-        Returns:
-            True if updated, False if not found
-        """
-        now = datetime.now()
+    async def update_last_used(self, token_id: UUID | str) -> bool:
+        if isinstance(token_id, str):
+            token_id = UUID(token_id)
+        now = datetime.now(timezone.utc)
         result = await self.session.execute(
-            update(Token)
-            .where(Token.id == token_id)
-            .values(last_used_at=now)
+            update(Token).where(Token.id == token_id).values(last_used_at=now)
         )
         return result.rowcount > 0
 
     async def delete_expired(self) -> int:
-        """
-        Delete all expired tokens.
-
-        Returns:
-            Number of tokens deleted
-        """
-        now = datetime.now()
-        from sqlalchemy import delete
-
+        now = datetime.now(timezone.utc)
         result = await self.session.execute(
-            delete(Token).where(
-                Token.expires_at.isnot(None),
-                Token.expires_at < now,
-            )
+            delete(Token).where(Token.expires_at.isnot(None), Token.expires_at < now)
         )
         return result.rowcount

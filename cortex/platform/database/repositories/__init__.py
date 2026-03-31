@@ -20,6 +20,7 @@ from cortex.platform.database.repositories.project import ProjectRepository
 from cortex.platform.database.repositories.principal import PrincipalRepository
 from cortex.platform.database.repositories.token import TokenRepository
 from cortex.platform.database.repositories.membership import MembershipRepository
+from cortex.platform.database.repositories.user import UserRepository
 
 __all__ = [
     "BaseRepository",
@@ -29,4 +30,5 @@ __all__ = [
     "PrincipalRepository",
     "TokenRepository",
     "MembershipRepository",
+    "UserRepository",
 ]

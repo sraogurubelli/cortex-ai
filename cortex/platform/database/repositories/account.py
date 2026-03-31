@@ -1,10 +1,7 @@
-"""
-Account Repository
-
-Data access layer for Account model.
-"""
+"""Account Repository"""
 
 from typing import List, Optional
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,34 +14,17 @@ class AccountRepository(BaseRepository[Account]):
     """Repository for Account operations."""
 
     def __init__(self, session: AsyncSession):
-        """Initialize account repository."""
         super().__init__(Account, session)
 
     async def find_by_email(self, billing_email: str) -> Optional[Account]:
-        """
-        Find account by billing email.
-
-        Args:
-            billing_email: Billing email address
-
-        Returns:
-            Account instance or None
-        """
         result = await self.session.execute(
             select(Account).where(Account.billing_email == billing_email)
         )
         return result.scalar_one_or_none()
 
-    async def find_by_owner(self, owner_id: int) -> List[Account]:
-        """
-        Find all accounts owned by a principal.
-
-        Args:
-            owner_id: Principal ID
-
-        Returns:
-            List of accounts
-        """
+    async def find_by_owner(self, owner_id: UUID | str) -> List[Account]:
+        if isinstance(owner_id, str):
+            owner_id = UUID(owner_id)
         result = await self.session.execute(
             select(Account)
             .where(Account.owner_id == owner_id)
@@ -55,17 +35,6 @@ class AccountRepository(BaseRepository[Account]):
     async def find_by_status(
         self, status: AccountStatus, limit: int = 100, offset: int = 0
     ) -> List[Account]:
-        """
-        Find accounts by status.
-
-        Args:
-            status: Account status
-            limit: Maximum number of results
-            offset: Offset for pagination
-
-        Returns:
-            List of accounts
-        """
         result = await self.session.execute(
             select(Account)
             .where(Account.status == status)
@@ -78,17 +47,6 @@ class AccountRepository(BaseRepository[Account]):
     async def find_by_tier(
         self, tier: SubscriptionTier, limit: int = 100, offset: int = 0
     ) -> List[Account]:
-        """
-        Find accounts by subscription tier.
-
-        Args:
-            tier: Subscription tier
-            limit: Maximum number of results
-            offset: Offset for pagination
-
-        Returns:
-            List of accounts
-        """
         result = await self.session.execute(
             select(Account)
             .where(Account.subscription_tier == tier)
@@ -99,21 +57,9 @@ class AccountRepository(BaseRepository[Account]):
         return list(result.scalars().all())
 
     async def find_expiring_trials(self, limit: int = 100) -> List[Account]:
-        """
-        Find accounts with expiring trials (status=TRIAL and trial_ends_at is set).
-
-        Args:
-            limit: Maximum number of results
-
-        Returns:
-            List of accounts with expiring trials
-        """
         result = await self.session.execute(
             select(Account)
-            .where(
-                Account.status == AccountStatus.TRIAL,
-                Account.trial_ends_at.isnot(None),
-            )
+            .where(Account.status == AccountStatus.TRIAL, Account.trial_ends_at.isnot(None))
             .order_by(Account.trial_ends_at.asc())
             .limit(limit)
         )

@@ -1,10 +1,7 @@
-"""
-Organization Repository
-
-Data access layer for Organization model.
-"""
+"""Organization Repository"""
 
 from typing import List, Optional
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,23 +14,13 @@ class OrganizationRepository(BaseRepository[Organization]):
     """Repository for Organization operations."""
 
     def __init__(self, session: AsyncSession):
-        """Initialize organization repository."""
         super().__init__(Organization, session)
 
     async def find_by_account(
-        self, account_id: int, limit: int = 100, offset: int = 0
+        self, account_id: UUID | str, limit: int = 100, offset: int = 0
     ) -> List[Organization]:
-        """
-        Find all organizations in an account.
-
-        Args:
-            account_id: Account ID
-            limit: Maximum number of results
-            offset: Offset for pagination
-
-        Returns:
-            List of organizations
-        """
+        if isinstance(account_id, str):
+            account_id = UUID(account_id)
         result = await self.session.execute(
             select(Organization)
             .where(Organization.account_id == account_id)
@@ -43,16 +30,9 @@ class OrganizationRepository(BaseRepository[Organization]):
         )
         return list(result.scalars().all())
 
-    async def find_by_owner(self, owner_id: int) -> List[Organization]:
-        """
-        Find all organizations owned by a principal.
-
-        Args:
-            owner_id: Principal ID
-
-        Returns:
-            List of organizations
-        """
+    async def find_by_owner(self, owner_id: UUID | str) -> List[Organization]:
+        if isinstance(owner_id, str):
+            owner_id = UUID(owner_id)
         result = await self.session.execute(
             select(Organization)
             .where(Organization.owner_id == owner_id)
@@ -60,17 +40,9 @@ class OrganizationRepository(BaseRepository[Organization]):
         )
         return list(result.scalars().all())
 
-    async def find_by_name(self, account_id: int, name: str) -> Optional[Organization]:
-        """
-        Find organization by name within an account.
-
-        Args:
-            account_id: Account ID
-            name: Organization name
-
-        Returns:
-            Organization instance or None
-        """
+    async def find_by_name(self, account_id: UUID | str, name: str) -> Optional[Organization]:
+        if isinstance(account_id, str):
+            account_id = UUID(account_id)
         result = await self.session.execute(
             select(Organization).where(
                 Organization.account_id == account_id, Organization.name == name

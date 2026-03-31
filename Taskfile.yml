@@ -1,14 +1,8 @@
 version: '3'
 
 vars:
-  # Use .venv Python/pip when present (e.g. after ensure-venv)
-  PYTHON: '{{`[ -d .venv ] && echo .venv/bin/python || echo python3`}}'
-  PIP: '{{`[ -d .venv ] && echo .venv/bin/pip || echo pip3`}}'
-  PYTEST: pytest
-  BLACK: black
-  RUFF: ruff
-  MYPY: mypy
-  BANDIT: bandit
+  VENV_PYTHON: .venv/bin/python
+  VENV_PIP: .venv/bin/pip
 
 tasks:
   # =========================================================================
@@ -28,14 +22,16 @@ tasks:
           echo "❌ python3.11 not found. Install with: brew install python@3.11"
           exit 1
         fi
+    status:
+      - test -d .venv
 
   install:
     desc: Install dependencies
+    deps: [ensure-venv]
     cmds:
-      - '{{.PYTHON}} -c "import sys; (sys.version_info >= (3, 11) or (print(\"❌ cortex-ai requires Python 3.11+. Current:\", sys.version, \"\n   Create a venv with: python3.11 -m venv .venv && source .venv/bin/activate\"), sys.exit(1)))"'
-      - '{{.PIP}} install -e ".[all-dev]"'
-      - '{{.PYTHON}} -m pre_commit install'
-    # Generates so install runs when .venv is new (no deps yet); sources trigger re-run when changed
+      - '{{.VENV_PYTHON}} -c "import sys; assert sys.version_info >= (3, 11), f''cortex-ai requires Python 3.11+. Current: {sys.version}''"'
+      - '{{.VENV_PIP}} install -e ".[all-dev]"'
+      - '{{.VENV_PYTHON}} -m pre_commit install || true'
     sources:
       - pyproject.toml
       - requirements.txt
@@ -78,22 +74,22 @@ tasks:
   format:
     desc: Format code with Black and Ruff
     cmds:
-      - '{{.BLACK}} cortex/ tests/ examples/'
-      - '{{.RUFF}} check --fix cortex/ tests/ examples/'
+      - '{{.VENV_PYTHON}} -m black cortex/ tests/ examples/'
+      - '{{.VENV_PYTHON}} -m ruff check --fix cortex/ tests/ examples/'
       - echo "✅ Code formatted"
 
   lint:
     desc: Run linters (Ruff, Mypy, Bandit)
     cmds:
-      - '{{.RUFF}} check cortex/ tests/ examples/'
-      - '{{.MYPY}} cortex/'
-      - '{{.BANDIT}} -r cortex/ -ll'
+      - '{{.VENV_PYTHON}} -m ruff check cortex/ tests/ examples/'
+      - '{{.VENV_PYTHON}} -m mypy cortex/'
+      - '{{.VENV_PYTHON}} -m bandit -r cortex/ -ll'
       - echo "✅ Linting passed"
 
   type-check:
     desc: Run type checking with Mypy
     cmds:
-      - '{{.MYPY}} cortex/'
+      - '{{.VENV_PYTHON}} -m mypy cortex/'
       - echo "✅ Type checking passed"
 
   check:
@@ -109,33 +105,33 @@ tasks:
   test:
     desc: Run all tests
     cmds:
-      - '{{.PYTEST}} tests/ -v'
+      - '{{.VENV_PYTHON}} -m pytest tests/ -v'
 
   test:unit:
     desc: Run unit tests only
     cmds:
-      - '{{.PYTEST}} tests/unit/ -v -m "not slow"'
+      - '{{.VENV_PYTHON}} -m pytest tests/unit/ -v -m "not slow"'
 
   test:integration:
     desc: Run integration tests
     cmds:
-      - '{{.PYTEST}} tests/integration/ -v'
+      - '{{.VENV_PYTHON}} -m pytest tests/integration/ -v'
 
   test:coverage:
     desc: Run tests with coverage report
     cmds:
-      - '{{.PYTEST}} tests/ --cov=cortex --cov-report=html --cov-report=term --cov-branch'
+      - '{{.VENV_PYTHON}} -m pytest tests/ --cov=cortex --cov-report=html --cov-report=term --cov-branch'
       - echo "✅ Coverage report generated in htmlcov/"
 
   test:watch:
     desc: Run tests in watch mode (requires pytest-watch)
     cmds:
-      - ptw tests/ -- -v
+      - '{{.VENV_PYTHON}} -m ptw tests/ -- -v'
 
   test:quick:
     desc: Run quick unit tests (no slow tests)
     cmds:
-      - '{{.PYTEST}} tests/unit/ -v -m "not slow" -x'
+      - '{{.VENV_PYTHON}} -m pytest tests/unit/ -v -m "not slow" -x'
 
   # =========================================================================
   # Development Server Tasks
@@ -146,7 +142,7 @@ tasks:
     cmds:
       - task: db:migrate
       - echo "🚀 Starting development server on http://localhost:8000"
-      - exec sh -c 'exec "$(test -d .venv && echo .venv/bin/python || echo python3)" -m cortex.api.main'
+      - exec {{.VENV_PYTHON}} -m cortex.api.main
 
   dev:debug:
     desc: Run development server with debugging enabled
@@ -154,16 +150,16 @@ tasks:
       DEBUG: "true"
       LOG_LEVEL: "DEBUG"
     cmds:
-      - exec sh -c 'exec "$(test -d .venv && echo .venv/bin/python || echo python3)" -m cortex.api.main'
+      - exec {{.VENV_PYTHON}} -m cortex.api.main
 
   # =========================================================================
   # Docker Tasks
   # =========================================================================
 
   docker:up:
-    desc: Start Docker services (PostgreSQL, Redis, Qdrant, Neo4j)
+    desc: Start Docker services (PostgreSQL, Redis, Qdrant)
     cmds:
-      - docker-compose up -d postgres redis qdrant neo4j
+      - docker compose up -d postgres redis qdrant
       - echo "Waiting for services to be ready..."
       - sleep 5
       - echo "✅ Docker services started"
@@ -171,32 +167,32 @@ tasks:
   docker:down:
     desc: Stop Docker services
     cmds:
-      - docker-compose down
+      - docker compose down
       - echo "✅ Docker services stopped"
 
   docker:logs:
     desc: View Docker service logs
     cmds:
-      - docker-compose logs -f
+      - docker compose logs -f
 
   docker:ps:
     desc: Show running Docker services
     cmds:
-      - docker-compose ps
+      - docker compose ps
 
   docker:reset:
     desc: Reset Docker volumes (WARNING - destroys data)
     prompt: This will delete all data in Docker volumes. Continue?
     cmds:
-      - docker-compose down -v
-      - docker-compose up -d postgres redis qdrant neo4j
+      - docker compose down -v
+      - docker compose up -d postgres redis qdrant
       - sleep 5
       - echo "✅ Docker volumes reset"
 
   docker:pull:
     desc: Pull latest Docker images
     cmds:
-      - docker-compose pull
+      - docker compose pull
 
   # =========================================================================
   # Database Tasks
@@ -205,32 +201,32 @@ tasks:
   db:migrate:
     desc: Run database migrations (Alembic - creates tables)
     cmds:
-      - alembic upgrade head
+      - '{{.VENV_PYTHON}} -m alembic upgrade head'
       - echo "✅ Database migrations completed"
 
   db:shell:
     desc: Open PostgreSQL shell
     cmds:
-      - docker-compose exec postgres psql -U cortex -d cortex
+      - docker compose exec postgres psql -U cortex -d cortex
 
   db:dump:
     desc: Dump database to dump.sql
     cmds:
-      - docker-compose exec postgres pg_dump -U cortex cortex > dump.sql
+      - docker compose exec postgres pg_dump -U cortex cortex > dump.sql
       - echo "✅ Database dumped to dump.sql"
 
   db:restore:
     desc: Restore database from dump.sql
     cmds:
-      - docker-compose exec -T postgres psql -U cortex cortex < dump.sql
+      - docker compose exec -T postgres psql -U cortex cortex < dump.sql
       - echo "✅ Database restored from dump.sql"
 
   db:reset:
     desc: Reset database (drop and recreate)
     prompt: This will delete all data in the database. Continue?
     cmds:
-      - docker-compose exec postgres psql -U cortex -d postgres -c "DROP DATABASE IF EXISTS cortex;"
-      - docker-compose exec postgres psql -U cortex -d postgres -c "CREATE DATABASE cortex;"
+      - docker compose exec postgres psql -U cortex -d postgres -c "DROP DATABASE IF EXISTS cortex;"
+      - docker compose exec postgres psql -U cortex -d postgres -c "CREATE DATABASE cortex;"
       - task: db:migrate
       - echo "✅ Database reset"
 
@@ -243,14 +239,14 @@ tasks:
     cmds:
       - echo "Starting platform demo..."
       - echo "Make sure the server is running with 'task dev' in another terminal"
-      - '{{.PYTHON}} examples/platform_demo.py'
+      - '{{.VENV_PYTHON}} examples/platform_demo.py'
 
   demo:graphrag:
     desc: Run GraphRAG demo
     cmds:
       - echo "Starting GraphRAG demo..."
       - echo "Make sure the server is running with 'task dev' in another terminal"
-      - '{{.PYTHON}} examples/test_graphrag_mvp.py'
+      - '{{.VENV_PYTHON}} examples/test_graphrag_mvp.py'
 
   # =========================================================================
   # Utility Tasks
@@ -259,12 +255,12 @@ tasks:
   pre-commit:
     desc: Run pre-commit hooks on all files
     cmds:
-      - pre-commit run --all-files
+      - '{{.VENV_PYTHON}} -m pre_commit run --all-files'
 
   pre-commit:update:
     desc: Update pre-commit hooks
     cmds:
-      - pre-commit autoupdate
+      - '{{.VENV_PYTHON}} -m pre_commit autoupdate'
       - echo "✅ Pre-commit hooks updated"
 
   list:
@@ -310,15 +306,15 @@ tasks:
     desc: Run CI test suite (same as GitHub Actions)
     deps: [docker:up]
     cmds:
-      - '{{.PYTEST}} tests/ -v --cov=cortex --cov-report=xml --cov-report=term'
+      - '{{.VENV_PYTHON}} -m pytest tests/ -v --cov=cortex --cov-report=xml --cov-report=term'
 
   ci:lint:
     desc: Run CI lint checks (same as GitHub Actions)
     cmds:
-      - '{{.RUFF}} check cortex/ tests/ examples/'
-      - '{{.BLACK}} --check cortex/ tests/ examples/'
-      - '{{.MYPY}} cortex/'
-      - '{{.BANDIT}} -r cortex/ -ll'
+      - '{{.VENV_PYTHON}} -m ruff check cortex/ tests/ examples/'
+      - '{{.VENV_PYTHON}} -m black --check cortex/ tests/ examples/'
+      - '{{.VENV_PYTHON}} -m mypy cortex/'
+      - '{{.VENV_PYTHON}} -m bandit -r cortex/ -ll'
 
   ci:all:
     desc: Run all CI checks locally
