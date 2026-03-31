@@ -744,3 +744,272 @@ async def search_documents(
     ]
 
     return SearchResponse(results=hits, query=request.query, total=len(hits))
+
+
+@router.post("/projects/{project_uid}/documents/{document_uid}/process-graph")
+async def process_document_graph(
+    project_uid: str,
+    document_uid: str,
+    principal: Principal = Depends(
+        require_permission(Permission.EDIT, "project", "project_uid")
+    ),
+    session: AsyncSession = Depends(get_db),
+):
+    """
+    Trigger knowledge graph extraction for a document.
+
+    Extracts entities, concepts, and relationships from document chunks
+    and stores them in Neo4j.
+
+    Args:
+        project_uid: Project UID
+        document_uid: Document UID
+        principal: Authenticated user with edit permission
+        session: Database session
+
+    Returns:
+        Processing status and graph stats (if completed)
+
+    Raises:
+        HTTPException: 404 if document not found, 403 if access denied, 500 on processing error
+    """
+    from cortex.platform.database.repositories import DocumentRepository
+    import asyncio
+
+    # Verify project exists
+    project_repo = ProjectRepository(session)
+    project = await project_repo.find_by_uid(project_uid)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found",
+        )
+
+    # Verify document exists and belongs to project
+    doc_repo = DocumentRepository(session)
+    document = await doc_repo.find_by_uid(document_uid)
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found",
+        )
+
+    # Verify document belongs to organization
+    from cortex.platform.database.repositories import OrganizationRepository
+    org_repo = OrganizationRepository(session)
+    organization = await org_repo.find_by_id(project.organization_id)
+    if document.organization_id != organization.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Document does not belong to this project's organization",
+        )
+
+    # Check if GraphRAG is enabled
+    if not _rag_services.get("graphrag_enabled"):
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="GraphRAG is not enabled. Set CORTEX_GRAPHRAG_ENABLED=true",
+        )
+
+    try:
+        # Update document status to processing
+        document.graph_status = "processing"
+        await doc_repo.update(document)
+        await session.commit()
+
+        # Get entity extractor
+        entity_extractor = _rag_services.get("entity_extractor")
+        if not entity_extractor:
+            from cortex.rag.graph.entity_extractor import EntityExtractor
+            entity_extractor = EntityExtractor()
+
+        # Get document chunks from vector store
+        doc_manager, retriever = await _get_rag_services()
+
+        # Retrieve all chunks for this document
+        chunks = await retriever.search(
+            query="",  # Empty query to get all chunks
+            top_k=1000,  # High limit to get all chunks
+            filter={"document_id": document_uid},
+        )
+
+        if not chunks:
+            # No chunks found - document not yet processed
+            document.graph_status = "failed"
+            document.error_message = "No document chunks found. Please upload and process the document first."
+            await doc_repo.update(document)
+            await session.commit()
+
+            return {
+                "document_id": document_uid,
+                "status": "failed",
+                "message": "No document chunks found",
+                "stats": None,
+            }
+
+        # Extract entities from chunks in background
+        async def _process_graph():
+            try:
+                tenant_id = f"org_{organization.id}"
+
+                # Process each chunk
+                entity_count = 0
+                concept_count = 0
+                relationship_count = 0
+                entity_types = {}
+
+                for chunk in chunks:
+                    try:
+                        # Extract entities from chunk
+                        extraction_result = await entity_extractor.extract_from_text(
+                            text=chunk.content,
+                            doc_id=document_uid,
+                            chunk_id=chunk.id,
+                            tenant_id=tenant_id,
+                        )
+
+                        # Count extracted elements
+                        if extraction_result:
+                            entity_count += len(extraction_result.get("entities", []))
+                            concept_count += len(extraction_result.get("concepts", []))
+                            relationship_count += len(extraction_result.get("relationships", []))
+
+                            # Count entity types
+                            for entity in extraction_result.get("entities", []):
+                                entity_type = entity.get("type", "unknown")
+                                entity_types[entity_type] = entity_types.get(entity_type, 0) + 1
+
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to extract entities from chunk {chunk.id}: {e}",
+                            exc_info=True,
+                        )
+                        continue
+
+                # Update document with graph stats
+                async with get_db_manager() as db_session:
+                    doc_repo_bg = DocumentRepository(db_session)
+                    doc_bg = await doc_repo_bg.find_by_uid(document_uid)
+                    if doc_bg:
+                        doc_bg.entity_count = entity_count
+                        doc_bg.concept_count = concept_count
+                        doc_bg.relationship_count = relationship_count
+                        doc_bg.graph_status = "completed"
+                        doc_bg.error_message = None
+                        await doc_repo_bg.update(doc_bg)
+                        await db_session.commit()
+
+                logger.info(
+                    f"Graph processing completed for document {document_uid}: "
+                    f"{entity_count} entities, {concept_count} concepts, {relationship_count} relationships"
+                )
+
+            except Exception as e:
+                logger.error(
+                    f"Graph processing failed for document {document_uid}: {e}",
+                    exc_info=True,
+                )
+                # Update status to failed
+                async with get_db_manager() as db_session:
+                    doc_repo_bg = DocumentRepository(db_session)
+                    doc_bg = await doc_repo_bg.find_by_uid(document_uid)
+                    if doc_bg:
+                        doc_bg.graph_status = "failed"
+                        doc_bg.error_message = str(e)
+                        await doc_repo_bg.update(doc_bg)
+                        await db_session.commit()
+
+        # Start background task
+        asyncio.create_task(_process_graph())
+
+        return {
+            "document_id": document_uid,
+            "status": "processing",
+            "message": "Graph extraction started in background",
+            "stats": None,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            f"Failed to start graph processing for document {document_uid}: {e}",
+            exc_info=True,
+        )
+        # Update document status
+        document.graph_status = "failed"
+        document.error_message = str(e)
+        await doc_repo.update(document)
+        await session.commit()
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to process graph: {str(e)}",
+        )
+
+
+@router.get("/projects/{project_uid}/documents/{document_uid}/graph/stats")
+async def get_document_graph_stats(
+    project_uid: str,
+    document_uid: str,
+    principal: Principal = Depends(
+        require_permission(Permission.VIEW, "project", "project_uid")
+    ),
+    session: AsyncSession = Depends(get_db),
+):
+    """
+    Get knowledge graph statistics for a document.
+
+    Args:
+        project_uid: Project UID
+        document_uid: Document UID
+        principal: Authenticated user with view permission
+        session: Database session
+
+    Returns:
+        Graph stats (entity/concept/relationship counts)
+
+    Raises:
+        HTTPException: 404 if document not found
+    """
+    from cortex.platform.database.repositories import DocumentRepository
+
+    # Verify project exists
+    project_repo = ProjectRepository(session)
+    project = await project_repo.find_by_uid(project_uid)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found",
+        )
+
+    # Get document
+    doc_repo = DocumentRepository(session)
+    document = await doc_repo.find_by_uid(document_uid)
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found",
+        )
+
+    # Verify document belongs to organization
+    from cortex.platform.database.repositories import OrganizationRepository
+    org_repo = OrganizationRepository(session)
+    organization = await org_repo.find_by_id(project.organization_id)
+    if document.organization_id != organization.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Document does not belong to this project's organization",
+        )
+
+    # Return graph stats
+    entity_types = {}  # TODO: Store this in document or query from Neo4j
+
+    return {
+        "entity_count": document.entity_count or 0,
+        "concept_count": document.concept_count or 0,
+        "relationship_count": document.relationship_count or 0,
+        "entity_types": entity_types,
+        "graph_status": document.graph_status,
+        "error_message": document.error_message,
+    }
